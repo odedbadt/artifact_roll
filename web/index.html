@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>artifact roll</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🎞️</text></svg>">
+
+<!-- Optional enhancers. Everything degrades gracefully if these fail to load
+     (offline box, locked-down network): markdown falls back to a built-in
+     mini-renderer and math is left as literal text. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="reel" aria-hidden="true"></span>
+    <h1>artifact roll</h1>
+  </div>
+  <div class="meta">
+    <span id="root-path" class="root-path" title="artifact root on the server"></span>
+    <span id="counts" class="counts"></span>
+  </div>
+  <div class="controls">
+    <label class="toggle"><input type="checkbox" id="follow" checked> follow</label>
+    <span id="status" class="status connecting"><i></i><span>connecting</span></span>
+  </div>
+</header>
+
+<main id="rolls" class="rolls" aria-live="polite"></main>
+
+<div id="empty" class="empty">
+  <p>No artifacts yet.</p>
+  <p class="hint">Drop files into <code id="empty-root">the artifact root</code> — one folder per agent:</p>
+<pre class="hint-code">artifacts/
+  researcher/     <span class="c">← becomes a roll</span>
+    findings.md
+    chart.svg
+    report/       <span class="c">← dir with index.html = one HTML artifact</span>
+      index.html
+  reviewer/
+    notes.md</pre>
+</div>
+
+<div id="overlay" class="overlay" hidden>
+  <div class="overlay-bar">
+    <span id="overlay-title" class="overlay-title"></span>
+    <div class="overlay-actions">
+      <a id="overlay-raw" class="btn" target="_blank" rel="noopener">open raw ↗</a>
+      <button id="overlay-close" class="btn" title="close (esc)">close ✕</button>
+    </div>
+  </div>
+  <div id="overlay-body" class="overlay-body"></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

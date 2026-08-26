@@ -1,0 +1,10 @@
+shard,layout,queries,p50_ms,p99_ms,errors
+shard-a,flat,4160,41.2,380.5,3
+shard-b,flat,4160,40.8,371.2,1
+shard-c,flat,4160,41.7,389.9,4
+shard-a,hashed,4160,38.9,204.1,0
+shard-b,hashed,4160,39.1,199.8,2
+shard-c,hashed,4160,38.6,208.4,0
+shard-a,clustered,4160,43.6,121.7,0
+shard-b,clustered,4160,44.1,118.3,1
+shard-c,clustered,4160,43.2,125.0,0

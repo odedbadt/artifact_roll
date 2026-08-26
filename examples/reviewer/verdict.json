@@ -1,0 +1,12 @@
+{
+  "verdict": "changes-requested",
+  "confidence": 0.72,
+  "blocking": false,
+  "checks": [
+    { "name": "reproducible", "passed": true, "note": null },
+    { "name": "cold-cache", "passed": false, "note": "not run" },
+    { "name": "unit-tests", "passed": false, "note": "fanout_cost uncovered" }
+  ],
+  "reviewer": "reviewer-agent",
+  "elapsed_s": 43.8
+}

@@ -1,0 +1,9 @@
+body { margin: 0; font: 14px ui-sans-serif, system-ui, sans-serif; background: #fbfcfd; color: #14181d; }
+.wrap { padding: 18px 20px; }
+h2 { margin: 0 0 14px; font-size: 15px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.tile { background: #fff; border: 1px solid #e3e7ec; border-radius: 8px; padding: 12px; text-align: center; }
+.tile b { display: block; font-size: 20px; letter-spacing: -.02em; }
+.tile span { font-size: 11px; color: #6b7583; text-transform: uppercase; letter-spacing: .06em; }
+.tile.ok b { color: #16a34a; }
+button { margin-top: 14px; padding: 7px 12px; border: 1px solid #d9dde3; border-radius: 6px; background: #fff; cursor: pointer; }
