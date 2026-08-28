@@ -68,6 +68,19 @@ body {
   z-index: 5;
 }
 
+.side-toggle {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-faint);
+  border-radius: 6px;
+  padding: 3px 7px;
+  font: 14px/1 var(--mono);
+  cursor: pointer;
+}
+.side-toggle:hover { color: var(--text); background: var(--line-soft); }
+.side-toggle.off { color: var(--text-faint); opacity: .55; }
+
 .brand { display: flex; align-items: center; gap: 10px; }
 
 .brand h1 {
@@ -117,54 +130,274 @@ body {
   100% { box-shadow: 0 0 0 7px rgba(126,224,168,0); }
 }
 
+/* ---------- tab strip ---------- */
+
+/* Holds exactly the rolls being written to right now, plus (dimmed) whichever
+   roll you are reading if it has since gone quiet. */
+.tabs {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0 10px;
+  min-height: 38px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  z-index: 4;
+}
+.tabs::-webkit-scrollbar { height: 0; }
+
+.tab {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  margin: 5px 0;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.tab:hover { background: var(--line-soft); color: var(--text); }
+.tab.active {
+  background: var(--bg);
+  border-color: var(--line);
+  color: var(--text);
+  box-shadow: 0 1px 0 var(--bg) , var(--shadow);
+}
+/* A quiet roll only keeps a tab while you are reading it, so don't dim the
+   one that is active -- just stop its dot from pulsing. */
+.tab.quiet:not(.active) { opacity: .6; }
+.tab.quiet .tab-dot { animation: none; box-shadow: none; opacity: .55; }
+
+.tab-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex: 0 0 auto;
+  animation: writing 2.2s ease-out infinite;
+}
+@keyframes writing {
+  0%   { box-shadow: 0 0 0 0 rgba(127,127,127,.45); }
+  100% { box-shadow: 0 0 0 6px rgba(127,127,127,0); }
+}
+
+.tab-label { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.tab-type { font-size: 12.5px; font-weight: 600; }
+.tab-inst { font: 11px var(--mono); color: var(--text-faint); }
+.tab.active .tab-inst { color: var(--text-dim); }
+
+.tab-badge {
+  min-width: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font: 600 10px/17px var(--mono);
+  text-align: center;
+}
+.tab-badge[hidden] { display: none; }
+
+.tab.wrote { animation: tab-wrote 1s ease-out; }
+@keyframes tab-wrote {
+  0%   { border-color: var(--fresh); }
+  100% { border-color: transparent; }
+}
+.tab.active.wrote { animation: tab-wrote-active 1s ease-out; }
+@keyframes tab-wrote-active {
+  0%   { border-color: var(--fresh); }
+  100% { border-color: var(--line); }
+}
+
+.tabs-none {
+  align-self: center;
+  margin-left: 6px;
+  font: 12px var(--mono);
+  color: var(--text-faint);
+}
+.tabs-none[hidden] { display: none; }
+
+/* ---------- stage: archive + the one visible roll ---------- */
+
+.stage {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  background: var(--line-soft);
+  gap: 1px;
+}
+
+.side {
+  flex: 0 0 236px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-raised);
+}
+body.side-off .side { display: none; }
+
+.side-head {
+  flex: 0 0 auto;
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.side-title {
+  font: 600 10.5px var(--sans);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.side-filter {
+  width: 100%;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--text);
+  font: 12px var(--mono);
+}
+.side-filter:focus { outline: none; border-color: var(--accent); }
+
+.side-list { flex: 1 1 auto; overflow-y: auto; padding: 6px 6px 20px; min-height: 0; }
+.side-none {
+  padding: 4px 14px 14px;
+  font: 12px var(--mono);
+  color: var(--text-faint);
+}
+.side-none[hidden] { display: none; }
+
+.side-type + .side-type { margin-top: 10px; }
+.side-type-head {
+  padding: 6px 8px 3px;
+  font: 600 11px var(--sans);
+  letter-spacing: .05em;
+  color: var(--text-dim);
+}
+
+.side-roll {
+  width: 100%;
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 8px;
+  border: 0; border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.side-roll:hover { background: var(--line-soft); color: var(--text); }
+.side-roll.sel { background: var(--accent-soft); color: var(--text); }
+.side-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; opacity: .45; }
+.side-roll.on .side-dot { opacity: 1; }
+.side-inst {
+  flex: 1 1 auto; min-width: 0;
+  font: 12px var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.side-n { font: 10.5px var(--mono); color: var(--text-faint); }
+.side-ago { font: 10.5px var(--mono); color: var(--text-faint); min-width: 26px; text-align: right; }
+.side-roll.on .side-ago { color: var(--fresh); }
+
+.side-arts { padding: 2px 0 4px 16px; }
+.side-art {
+  width: 100%;
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 2px 8px;
+  border: 0; border-radius: 5px;
+  background: none;
+  color: var(--text-faint);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.side-art:hover { background: var(--line-soft); color: var(--text); }
+.side-art-kind {
+  flex: 0 0 auto;
+  font: 600 9px var(--mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: .8;
+  width: 28px;
+}
+.side-art-name {
+  flex: 1 1 auto; min-width: 0;
+  font: 11.5px var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* ---------- rolls ---------- */
 
 .rolls {
   flex: 1 1 auto;
   display: flex;
-  gap: 1px;
-  background: var(--line-soft);
-  overflow-x: auto;
-  overflow-y: hidden;
+  min-width: 0;
   min-height: 0;
+  background: var(--bg);
 }
 
 .roll {
-  flex: 1 1 0;
-  min-width: 340px;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg);
   min-height: 0;
   position: relative;
 }
+.roll[hidden] { display: none; }
 
 .roll-head {
   flex: 0 0 auto;
   display: flex; align-items: center; gap: 8px;
-  padding: 8px 14px;
+  padding: 8px 16px;
   background: var(--bg-raised);
   border-bottom: 1px solid var(--line);
 }
 .roll-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.roll-label {
+  display: flex; align-items: baseline; gap: 6px;
+  min-width: 0;
+}
 .roll-name {
   font-weight: 600; font-size: 13px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.roll-count {
-  margin-left: auto;
+.roll-instance {
   font-family: var(--mono); font-size: 11px; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.roll-state {
+  margin-left: auto;
+  font: 11px var(--mono);
+  color: var(--text-faint);
+}
+.roll-state.on { color: var(--fresh); }
+.roll-count {
+  font: 11px var(--mono); color: var(--text-faint);
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
 }
 
 .roll-body {
   flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 14px 14px 28px;
+  padding: 16px 16px 32px;
+  scroll-behavior: smooth;
+}
+.roll-inner {
+  max-width: 1120px;
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  scroll-behavior: smooth;
 }
 
 .jump {
@@ -203,6 +436,13 @@ body {
 @keyframes flash {
   0%   { border-color: var(--fresh); }
   100% { border-color: var(--line); }
+}
+
+/* jumped to from the archive pane */
+.card.targeted { animation: target 1.6s ease-out; }
+@keyframes target {
+  0%   { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow); }
+  100% { border-color: var(--line); box-shadow: var(--shadow); }
 }
 
 .card.leaving { animation: fade-out .22s ease-in both; }
@@ -390,7 +630,7 @@ table.csv tr:nth-child(even) td { background: rgba(127,127,127,.045); }
 
 .empty {
   position: absolute;
-  inset: 46px 0 0 0;
+  inset: 90px 0 0 0;
   display: none;
   flex-direction: column;
   align-items: center;

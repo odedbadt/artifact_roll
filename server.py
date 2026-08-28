@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """artifact_roll -- a thin server that streams a directory of artifacts to a browser.
 
-Point it at a directory that agents dump files into.  Every top-level
-subdirectory is an "agent"; each file (or each sub-directory holding an
-index.html) below it is an artifact.  The browser gets a live roll per agent,
-newest artifact sliding in at the bottom.
+Point it at a directory that agents dump files into.  The tree is two levels
+deep: <root>/<agent-type>/<agent-id>/.  A type is a class of agent (architect,
+builder, ...); an id is one running instance of it.  Each <type>/<id> pair is a
+"roll" of its own, so two architects working at once never mix.  Below that,
+each file (or each sub-directory holding an index.html) is an artifact.
 
 Stdlib only.  Run:  python3 server.py --root ./artifacts --port 8787
 """
@@ -26,7 +27,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(HERE, "web")
 
-ROOT_AGENT = "main"
 IGNORED_NAMES = {"__pycache__", "node_modules", ".git", ".DS_Store", "Thumbs.db"}
 INDEX_NAMES = ("index.html", "index.htm")
 
@@ -138,7 +138,7 @@ def skip(name: str) -> bool:
 # --------------------------------------------------------------------------
 
 
-def file_artifact(root: str, rel: str, agent: str) -> dict | None:
+def file_artifact(root: str, rel: str, roll: dict) -> dict | None:
     full = os.path.join(root, rel)
     try:
         st = os.stat(full)
@@ -148,7 +148,9 @@ def file_artifact(root: str, rel: str, agent: str) -> dict | None:
     kind, lang = classify(name)
     return {
         "id": rel_posix(rel),
-        "agent": agent,
+        "agent": roll["agent"],
+        "type": roll["type"],
+        "instance": roll["instance"],
         "path": rel_posix(rel),
         "entry": rel_posix(rel),
         "name": name,
@@ -160,7 +162,7 @@ def file_artifact(root: str, rel: str, agent: str) -> dict | None:
     }
 
 
-def bundle_artifact(root: str, reldir: str, agent: str, index_name: str) -> dict:
+def bundle_artifact(root: str, reldir: str, roll: dict, index_name: str) -> dict:
     newest = 0.0
     total = 0
     count = 0
@@ -179,7 +181,9 @@ def bundle_artifact(root: str, reldir: str, agent: str, index_name: str) -> dict
             count += 1
     return {
         "id": rel_posix(reldir) + "/",
-        "agent": agent,
+        "agent": roll["agent"],
+        "type": roll["type"],
+        "instance": roll["instance"],
         "path": rel_posix(reldir),
         "entry": rel_posix(os.path.join(reldir, index_name)),
         "name": os.path.basename(reldir),
@@ -192,7 +196,7 @@ def bundle_artifact(root: str, reldir: str, agent: str, index_name: str) -> dict
     }
 
 
-def walk_agent(root: str, reldir: str, agent: str, out: list) -> None:
+def walk_roll(root: str, reldir: str, roll: dict, out: list) -> None:
     try:
         entries = sorted(os.scandir(os.path.join(root, reldir)), key=lambda e: e.name)
     except OSError:
@@ -206,80 +210,146 @@ def walk_agent(root: str, reldir: str, agent: str, out: list) -> None:
         except OSError:
             continue
         if is_dir:
-            # A directory below the agent level that carries an index.html is a
+            # A directory below the roll level that carries an index.html is a
             # single HTML artifact, not a container of artifacts.
             index_name = next(
                 (n for n in INDEX_NAMES if os.path.isfile(os.path.join(root, rel, n))),
                 None,
             )
             if index_name:
-                out.append(bundle_artifact(root, rel, agent, index_name))
+                out.append(bundle_artifact(root, rel, roll, index_name))
             else:
-                walk_agent(root, rel, agent, out)
+                walk_roll(root, rel, roll, out)
         else:
-            art = file_artifact(root, rel, agent)
+            art = file_artifact(root, rel, roll)
             if art:
                 out.append(art)
 
 
-def scan(root: str) -> list[dict]:
-    out: list[dict] = []
+def subdirs(path: str) -> list[str]:
     try:
-        entries = sorted(os.scandir(root), key=lambda e: e.name)
+        entries = sorted(os.scandir(path), key=lambda e: e.name)
     except OSError:
-        return out
+        return []
+    names = []
     for entry in entries:
         if skip(entry.name):
             continue
         try:
             if entry.is_dir():
-                walk_agent(root, entry.name, entry.name, out)
-            elif entry.is_file():
-                art = file_artifact(root, entry.name, ROOT_AGENT)
-                if art:
-                    out.append(art)
+                names.append(entry.name)
         except OSError:
             continue
-    out.sort(key=lambda a: (a["agent"].lower(), a["mtime"], a["path"]))
+    return names
+
+
+def scan(root: str) -> list[dict]:
+    """Collect artifacts from every <root>/<type>/<instance>/ roll.
+
+    Only that shape counts.  Loose files directly under the root or under a
+    type directory belong to no instance, so they are deliberately skipped
+    rather than guessed into a roll.
+    """
+    out: list[dict] = []
+    for atype in subdirs(root):
+        for instance in subdirs(os.path.join(root, atype)):
+            roll = {
+                "agent": f"{atype}/{instance}",
+                "type": atype,
+                "instance": instance,
+            }
+            walk_roll(root, os.path.join(atype, instance), roll, out)
+    out.sort(key=lambda a: (a["type"].lower(), a["instance"].lower(), a["mtime"], a["path"]))
     return out
 
 
 class Scanner(threading.Thread):
-    """Polls the artifact root and bumps a version whenever anything changes."""
+    """Polls the artifact root and bumps a version whenever anything changes.
+
+    Besides the flat artifact list it derives one record per roll, carrying the
+    wall-clock moment the roll's contents were last seen to differ.  A roll is
+    "live" while that moment is inside the live window -- which is what the UI
+    puts in its tab strip.  Liveness decays on its own, so a roll going quiet is
+    itself a change worth pushing.
+    """
 
     daemon = True
 
-    def __init__(self, root: str, interval: float):
+    def __init__(self, root: str, interval: float, live_window: float):
         super().__init__(name="scanner")
         self.root = root
         self.interval = interval
+        self.live_window = live_window
         self.cond = threading.Condition()
         self.version = 0
         self.snapshot: list[dict] = []
+        self.rolls: list[dict] = []
+        self._sig: dict[str, list] = {}          # agent -> content signature
+        self._changed: dict[str, float] = {}     # agent -> when it last differed
+        self._seeded = False
         self._stop = threading.Event()
 
     def run(self) -> None:
         while not self._stop.is_set():
             items = scan(self.root)
+            rolls = self._roll_state(items, time.time())
             with self.cond:
-                if items != self.snapshot:
+                if items != self.snapshot or rolls != self.rolls:
                     self.snapshot = items
+                    self.rolls = rolls
                     self.version += 1
                     self.cond.notify_all()
             self._stop.wait(self.interval)
 
-    def current(self) -> tuple[int, list[dict]]:
-        with self.cond:
-            return self.version, self.snapshot
+    def _roll_state(self, items: list[dict], now: float) -> list[dict]:
+        groups: dict[str, list[dict]] = {}
+        for art in items:
+            groups.setdefault(art["agent"], []).append(art)
 
-    def wait_for_change(self, seen: int, timeout: float) -> tuple[int, list[dict] | None]:
+        for agent in list(self._sig):
+            if agent not in groups:
+                self._sig.pop(agent, None)
+                self._changed.pop(agent, None)
+
+        out = []
+        for agent, arts in groups.items():
+            sig = [(a["id"], a["mtime"], a["size"]) for a in arts]
+            if self._sig.get(agent) != sig:
+                first_sighting = agent not in self._sig
+                self._sig[agent] = sig
+                # On the very first scan, date each roll from its newest file
+                # instead of from now -- otherwise pointing the server at an
+                # existing tree would light every agent up as if it had just
+                # written.  Anything appearing later really did just change.
+                if first_sighting and not self._seeded:
+                    self._changed[agent] = min(now, max(a["mtime"] for a in arts))
+                else:
+                    self._changed[agent] = now
+            last = self._changed[agent]
+            out.append({
+                "agent": agent,
+                "type": arts[0]["type"],
+                "instance": arts[0]["instance"],
+                "count": len(arts),
+                "lastChange": last,
+                "live": self.live_window <= 0 or (now - last) < self.live_window,
+            })
+        self._seeded = True
+        out.sort(key=lambda r: (r["type"].lower(), r["instance"].lower()))
+        return out
+
+    def current(self) -> tuple[int, list[dict], list[dict]]:
+        with self.cond:
+            return self.version, self.snapshot, self.rolls
+
+    def wait_for_change(self, seen: int, timeout: float):
         with self.cond:
             if self.version != seen:
-                return self.version, self.snapshot
+                return self.version, self.snapshot, self.rolls
             self.cond.wait(timeout)
             if self.version != seen:
-                return self.version, self.snapshot
-            return self.version, None
+                return self.version, self.snapshot, self.rolls
+            return self.version, None, None
 
     def stop(self) -> None:
         self._stop.set()
@@ -380,8 +450,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/app.js", "/styles.css"):
             self._serve_web(path.lstrip("/"), cookie_hdr)
         elif path == "/api/artifacts":
-            version, items = self.scanner.current()
-            self._json({"version": version, "root": self.root, "artifacts": items})
+            version, items, rolls = self.scanner.current()
+            self._json({
+                "version": version,
+                "root": self.root,
+                "liveWindow": self.scanner.live_window,
+                "now": time.time(),
+                "rolls": rolls,
+                "artifacts": items,
+            })
         elif path == "/events":
             self._serve_events()
         elif path.startswith("/raw/"):
@@ -438,12 +515,17 @@ class Handler(BaseHTTPRequestHandler):
         seen = -1
         try:
             while True:
-                version, items = self.scanner.wait_for_change(seen, 15.0)
+                version, items, rolls = self.scanner.wait_for_change(seen, 15.0)
                 if items is None:
                     self.wfile.write(b": keepalive\n\n")
                 else:
                     seen = version
-                    payload = json.dumps({"version": version, "artifacts": items})
+                    payload = json.dumps({
+                        "version": version,
+                        "now": time.time(),
+                        "rolls": rolls,
+                        "artifacts": items,
+                    })
                     self.wfile.write(b"event: snapshot\ndata: " + payload.encode("utf-8") + b"\n\n")
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
@@ -461,11 +543,12 @@ def local_ip() -> str:
         sock.close()
 
 
-def serve(root: str, host: str, port: int, interval: float, token: str | None, verbose: bool) -> None:
+def serve(root: str, host: str, port: int, interval: float, live_window: float,
+          token: str | None, verbose: bool) -> None:
     os.makedirs(root, exist_ok=True)
     root = os.path.realpath(root)
 
-    scanner = Scanner(root, interval)
+    scanner = Scanner(root, interval, live_window)
     scanner.start()
 
     handler = type("BoundHandler", (Handler,), {
@@ -480,11 +563,15 @@ def serve(root: str, host: str, port: int, interval: float, token: str | None, v
 
     shown = host if host not in ("0.0.0.0", "::") else local_ip()
     suffix = f"?t={token}" if token else ""
-    print(f"artifact_roll  serving {root}")
-    print(f"               http://{shown}:{port}/{suffix}")
+    # flush=True: stdout is block-buffered when redirected, so without this the
+    # banner never appears under nohup/systemd -- exactly the remote case.
+    print(f"artifact_roll  serving {root}", flush=True)
+    print(f"               http://{shown}:{port}/{suffix}", flush=True)
     if host in ("0.0.0.0", "::"):
-        print(f"               http://127.0.0.1:{port}/{suffix}  (local)")
-    print(f"               polling every {interval:g}s -- ctrl-c to stop")
+        print(f"               http://127.0.0.1:{port}/{suffix}  (local)", flush=True)
+    window = f"{live_window:g}s" if live_window > 0 else "never (always live)"
+    print(f"               polling every {interval:g}s, rolls go quiet after {window}", flush=True)
+    print("               ctrl-c to stop", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -501,10 +588,12 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1", help="bind address (use 0.0.0.0 to expose remotely)")
     ap.add_argument("--port", type=int, default=8787, help="port (default: 8787)")
     ap.add_argument("--poll", type=float, default=0.5, help="filesystem poll interval in seconds")
+    ap.add_argument("--live-window", type=float, default=120.0, metavar="SECS",
+                    help="how long after its last write a roll keeps its tab (0 = forever)")
     ap.add_argument("--token", default=None, help="require ?t=TOKEN before serving anything")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every request")
     args = ap.parse_args()
-    serve(args.root, args.host, args.port, args.poll, args.token, args.verbose)
+    serve(args.root, args.host, args.port, args.poll, args.live_window, args.token, args.verbose)
 
 
 if __name__ == "__main__":

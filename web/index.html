@@ -18,6 +18,7 @@
 <body>
 
 <header class="topbar">
+  <button id="side-toggle" class="side-toggle" title="show / hide the archive (\)" aria-label="toggle archive">◧</button>
   <div class="brand">
     <span class="reel" aria-hidden="true"></span>
     <h1>artifact roll</h1>
@@ -32,19 +33,37 @@
   </div>
 </header>
 
-<main id="rolls" class="rolls" aria-live="polite"></main>
+<!-- One tab per roll an agent is currently writing to. Rolls that go quiet
+     drop out of here and stay reachable through the archive. -->
+<nav id="tabs" class="tabs" role="tablist" aria-label="live rolls"></nav>
+
+<div class="stage">
+  <aside id="side" class="side">
+    <div class="side-head">
+      <span class="side-title">archive</span>
+      <input id="side-filter" class="side-filter" type="search" placeholder="filter…" spellcheck="false" aria-label="filter rolls and artifacts">
+    </div>
+    <div id="side-list" class="side-list"></div>
+    <div id="side-empty" class="side-none">nothing yet</div>
+  </aside>
+
+  <main id="rolls" class="rolls"></main>
+</div>
 
 <div id="empty" class="empty">
   <p>No artifacts yet.</p>
-  <p class="hint">Drop files into <code id="empty-root">the artifact root</code> — one folder per agent:</p>
+  <p class="hint">Drop files into <code id="empty-root">the artifact root</code> — agent type, then agent id:</p>
 <pre class="hint-code">artifacts/
-  researcher/     <span class="c">← becomes a roll</span>
-    findings.md
-    chart.svg
-    report/       <span class="c">← dir with index.html = one HTML artifact</span>
-      index.html
+  researcher/       <span class="c">← agent type</span>
+    r-01/           <span class="c">← one instance = one roll</span>
+      findings.md
+      report/       <span class="c">← dir with index.html = one HTML artifact</span>
+        index.html
+    r-02/           <span class="c">← a second researcher, its own roll</span>
+      chart.svg
   reviewer/
-    notes.md</pre>
+    v-01/
+      notes.md</pre>
 </div>
 
 <div id="overlay" class="overlay" hidden>

@@ -1,13 +1,26 @@
 /* artifact roll -- live client.
  *
- * Holds one column ("roll") per agent, ordered oldest -> newest, and reconciles
- * it against snapshots pushed over SSE.  New artifacts animate in at the bottom.
+ * One pane ("roll") per agent instance -- a <type>/<id> pair, so two agents of
+ * the same type running at once never share a pane -- ordered oldest -> newest
+ * and reconciled against snapshots pushed over SSE.  New artifacts animate in
+ * at the bottom.
+ *
+ * Only one roll is on screen at a time.  The tab strip holds exactly the rolls
+ * an agent is currently writing to (the server decides that; see --live-window),
+ * so it empties itself as agents finish.  Everything ever written, live or long
+ * finished, stays reachable through the archive pane on the left.
  */
 (function () {
   "use strict";
 
   var els = {
     rolls: document.getElementById("rolls"),
+    tabs: document.getElementById("tabs"),
+    side: document.getElementById("side"),
+    sideList: document.getElementById("side-list"),
+    sideEmpty: document.getElementById("side-empty"),
+    sideFilter: document.getElementById("side-filter"),
+    sideToggle: document.getElementById("side-toggle"),
     empty: document.getElementById("empty"),
     emptyRoot: document.getElementById("empty-root"),
     root: document.getElementById("root-path"),
@@ -21,9 +34,12 @@
     overlayClose: document.getElementById("overlay-close")
   };
 
-  var cards = new Map();   // id -> {el, art, body}
-  var rolls = new Map();   // agent -> {el, body, countEl, jumpEl, pending}
+  var cards = new Map();   // artifact id -> {el, art, body, sub}
+  var rolls = new Map();   // "type/id" -> roll entry (see buildRoll)
+  var order = [];          // agents, in tab / archive order
+  var selected = null;     // agent whose pane is on screen
   var primed = false;      // first snapshot renders without the jump-in animation
+  var skew = 0;            // clientClock - serverClock, so mtimes read honestly
 
   // ---------------------------------------------------------------- utils
 
@@ -58,7 +74,7 @@
   }
 
   function relTime(mtime) {
-    var secs = Date.now() / 1000 - mtime;
+    var secs = Date.now() / 1000 - skew - mtime;
     if (secs < 5) return "now";
     if (secs < 60) return Math.floor(secs) + "s";
     if (secs < 3600) return Math.floor(secs / 60) + "m";
@@ -67,10 +83,21 @@
   }
 
   var AGENT_HUES = [205, 145, 35, 280, 0, 175, 320, 60];
-  function agentColor(name) {
+  var INSTANCE_SHADES = [58, 72, 44, 65, 51];
+
+  function hashOf(name) {
     var h = 0;
     for (var i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-    return "hsl(" + AGENT_HUES[h % AGENT_HUES.length] + " 70% 58%)";
+    return h;
+  }
+
+  // Hue identifies the agent type; instances of one type share it and separate
+  // by lightness, so sibling columns read as siblings at a glance.  The shade
+  // comes from the instance's position within its type rather than from a hash
+  // of its id -- hashing lets two live siblings collide on the same shade.
+  function rollColor(type, ordinal) {
+    var hue = AGENT_HUES[hashOf(type) % AGENT_HUES.length];
+    return "hsl(" + hue + " 70% " + INSTANCE_SHADES[ordinal % INSTANCE_SHADES.length] + "%)";
   }
 
   function fetchText(url) {
@@ -445,32 +472,47 @@
     return { el: card, body: body, sub: sub, art: art };
   }
 
-  function buildRoll(agent) {
-    var col = el("section", "roll");
-    col.dataset.agent = agent;
+  function buildRoll(art) {
+    var pane = el("section", "roll");
+    pane.dataset.agent = art.agent;
+    pane.hidden = true;
 
     var head = el("header", "roll-head");
     var dot = el("span", "roll-dot");
-    dot.style.background = agentColor(agent);
-    head.appendChild(dot);
-    head.appendChild(el("span", "roll-name", agent));
+    var label = el("span", "roll-label");
+    label.appendChild(el("span", "roll-name", art.type));
+    label.appendChild(el("span", "roll-instance", "· " + art.instance));
+    label.title = art.agent;
+    var state = el("span", "roll-state");
     var count = el("span", "roll-count", "0");
-    head.appendChild(count);
+    head.append(dot, label, state, count);
 
     var body = el("div", "roll-body");
+    var inner = el("div", "roll-inner");
+    body.appendChild(inner);
 
     var jump = el("button", "jump", "new ↓");
     jump.hidden = true;
-    jump.addEventListener("click", function () {
-      body.scrollTop = body.scrollHeight;
-    });
+    jump.addEventListener("click", function () { toBottom(entry); });
 
     body.addEventListener("scroll", function () {
-      if (atBottom(body)) { entry.pending = 0; jump.hidden = true; }
+      entry.stick = atBottom(body);
+      if (entry.stick) { entry.pending = 0; jump.hidden = true; paintTab(entry); }
     });
 
-    col.append(head, body, jump);
-    var entry = { el: col, body: body, countEl: count, jumpEl: jump, pending: 0 };
+    pane.append(head, body, jump);
+
+    var entry = {
+      agent: art.agent, type: art.type, instance: art.instance,
+      el: pane, body: body, inner: inner,
+      dotEl: dot, stateEl: state, countEl: count, jumpEl: jump,
+      arts: [], count: 0, color: "",
+      live: false, lastChange: art.mtime,
+      pending: 0,        // artifacts that landed while you were not looking
+      stick: true,       // follow the bottom until you scroll away from it
+      flash: false,      // the tab should pulse on the next paint
+      tabEl: null, tabBadge: null
+    };
     return entry;
   }
 
@@ -478,9 +520,205 @@
     return node.scrollHeight - node.scrollTop - node.clientHeight < 60;
   }
 
+  function toBottom(roll) {
+    roll.body.scrollTop = roll.body.scrollHeight;
+    roll.stick = true;
+    roll.pending = 0;
+    roll.jumpEl.hidden = true;
+    paintTab(roll);
+  }
+
+  // ------------------------------------------------------------------- tabs
+
+  var tabsNone = el("span", "tabs-none", "no agent is writing — pick a roll from the archive");
+
+  function buildTab(roll) {
+    var tab = el("button", "tab");
+    tab.type = "button";
+    tab.setAttribute("role", "tab");
+    tab.dataset.agent = roll.agent;
+    tab.appendChild(el("span", "tab-dot"));
+    var label = el("span", "tab-label");
+    label.appendChild(el("span", "tab-type", roll.type));
+    label.appendChild(el("span", "tab-inst", roll.instance));
+    tab.appendChild(label);
+    var badge = el("span", "tab-badge");
+    badge.hidden = true;
+    tab.appendChild(badge);
+    tab.addEventListener("click", function () { select(roll.agent); });
+    roll.tabEl = tab;
+    roll.tabBadge = badge;
+    return tab;
+  }
+
+  function paintTab(roll) {
+    var tab = roll.tabEl;
+    if (!tab) return;
+    var active = roll.agent === selected;
+    tab.classList.toggle("active", active);
+    tab.classList.toggle("quiet", !roll.live);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.title = roll.agent + (roll.live ? " — writing" : " — quiet for " + relTime(roll.lastChange));
+    tab.firstChild.style.background = roll.color;
+    var show = !active && roll.pending > 0;
+    roll.tabBadge.hidden = !show;
+    if (show) roll.tabBadge.textContent = roll.pending > 99 ? "99+" : String(roll.pending);
+    if (roll.flash) {
+      roll.flash = false;
+      tab.classList.remove("wrote");
+      void tab.offsetWidth;                 // restart the pulse
+      tab.classList.add("wrote");
+    }
+  }
+
+  // A tab exists only for a roll something is actively writing to.  The one
+  // exception is whatever you are currently reading: it keeps its tab (dimmed)
+  // after going quiet, so the page never shows a pane with nothing above it.
+  function syncTabs() {
+    var want = order.filter(function (agent) {
+      var roll = rolls.get(agent);
+      return roll && (roll.live || agent === selected);
+    });
+    var wanted = new Set(want);
+
+    rolls.forEach(function (roll) {
+      if (roll.tabEl && !wanted.has(roll.agent)) {
+        roll.tabEl.remove();
+        roll.tabEl = null;
+        roll.tabBadge = null;
+      }
+    });
+
+    want.forEach(function (agent, i) {
+      var roll = rolls.get(agent);
+      if (!roll.tabEl) buildTab(roll);
+      var at = els.tabs.children[i];
+      if (at !== roll.tabEl) els.tabs.insertBefore(roll.tabEl, at || null);
+      paintTab(roll);
+    });
+
+    if (tabsNone.parentNode !== els.tabs) els.tabs.appendChild(tabsNone);
+    tabsNone.textContent = rolls.size
+      ? "nothing is being written right now"
+      : "waiting for an agent to write something";
+    tabsNone.hidden = want.some(function (agent) { return rolls.get(agent).live; });
+  }
+
+  function tabOrder() {
+    return Array.prototype.map.call(
+      els.tabs.querySelectorAll(".tab"),
+      function (t) { return t.dataset.agent; }
+    );
+  }
+
+  function stepTab(delta) {
+    var list = tabOrder();
+    if (!list.length) return;
+    var at = list.indexOf(selected);
+    select(list[(at + delta + list.length) % list.length]);
+  }
+
+  // ---------------------------------------------------------------- archive
+
+  function syncSide() {
+    var q = els.sideFilter.value.trim().toLowerCase();
+    var keep = els.sideList.scrollTop;
+    var frag = document.createDocumentFragment();
+    var group = null, shown = 0;
+
+    order.forEach(function (agent) {
+      var roll = rolls.get(agent);
+      if (!roll) return;
+
+      var hitRoll = !q || roll.agent.toLowerCase().indexOf(q) >= 0;
+      var hitArts = q
+        ? roll.arts.filter(function (a) { return a.name.toLowerCase().indexOf(q) >= 0; })
+        : [];
+      if (!hitRoll && !hitArts.length) return;
+      shown++;
+
+      if (!group || group.dataset.type !== roll.type) {
+        group = el("div", "side-type");
+        group.dataset.type = roll.type;
+        var gh = el("div", "side-type-head");
+        gh.appendChild(el("span", "side-type-name", roll.type));
+        group.appendChild(gh);
+        frag.appendChild(group);
+      }
+
+      var row = el("button", "side-roll");
+      row.type = "button";
+      row.classList.toggle("sel", roll.agent === selected);
+      row.classList.toggle("on", roll.live);
+      var dot = el("span", "side-dot");
+      dot.style.background = roll.color;
+      row.appendChild(dot);
+      row.appendChild(el("span", "side-inst", roll.instance));
+      row.appendChild(el("span", "side-n", String(roll.count)));
+      var ago = el("span", "side-ago", roll.live ? "live" : relTime(roll.lastChange));
+      ago.dataset.change = roll.lastChange;
+      row.appendChild(ago);
+      row.addEventListener("click", function () { select(roll.agent); });
+      group.appendChild(row);
+
+      // Artifact names show for the roll you are reading, and for any roll the
+      // filter matched by artifact name -- that is what makes the pane a way
+      // to navigate old artifacts rather than just old rolls.
+      var list = hitArts.length ? hitArts : (roll.agent === selected ? roll.arts : null);
+      if (!list || !list.length) return;
+      var box = el("div", "side-arts");
+      list.forEach(function (art) {
+        var item = el("button", "side-art");
+        item.type = "button";
+        item.title = art.path;
+        item.appendChild(el("span", "side-art-kind", art.bundle ? "site" : art.kind));
+        item.appendChild(el("span", "side-art-name", art.name));
+        item.addEventListener("click", function () { reveal(art); });
+        box.appendChild(item);
+      });
+      group.appendChild(box);
+    });
+
+    els.sideList.replaceChildren(frag);
+    els.sideEmpty.hidden = shown > 0;
+    els.sideEmpty.textContent = q ? "no match" : "nothing yet";
+    els.sideList.scrollTop = keep;
+  }
+
+  // -------------------------------------------------------------- selection
+
+  function select(agent) {
+    var roll = rolls.get(agent);
+    if (!roll) return;
+    var changed = selected !== agent;
+    if (changed && selected) {
+      var prev = rolls.get(selected);
+      if (prev) prev.el.hidden = true;
+    }
+    selected = agent;
+    roll.el.hidden = false;
+    roll.pending = 0;
+    roll.jumpEl.hidden = true;
+    if (roll.stick && els.follow.checked) roll.body.scrollTop = roll.body.scrollHeight;
+    syncTabs();
+    if (changed) syncSide(); else paintTab(roll);
+  }
+
+  function reveal(art) {
+    select(art.agent);
+    var entry = cards.get(art.id);
+    if (!entry) return;
+    var roll = rolls.get(art.agent);
+    if (roll) roll.stick = false;          // you asked for a spot; stop chasing
+    entry.el.scrollIntoView({ block: "start", behavior: "smooth" });
+    entry.el.classList.remove("targeted");
+    void entry.el.offsetWidth;
+    entry.el.classList.add("targeted");
+  }
+
   // ------------------------------------------------------------- reconcile
 
-  function apply(artifacts) {
+  function apply(artifacts, rollRecs) {
     var byId = new Map();
     var byAgent = new Map();
     artifacts.forEach(function (a) {
@@ -501,27 +739,44 @@
     rolls.forEach(function (roll, agent) {
       if (byAgent.has(agent)) return;
       rolls.delete(agent);
+      if (roll.tabEl) roll.tabEl.remove();
       roll.el.remove();
+      if (selected === agent) selected = null;
     });
 
-    var agents = Array.from(byAgent.keys()).sort(function (a, b) {
-      return a.localeCompare(b);
+    var recs = new Map();
+    (rollRecs || []).forEach(function (r) { recs.set(r.agent, r); });
+
+    // type first, then instance, so a type's rolls stay adjacent everywhere
+    order = Array.from(byAgent.keys()).sort(function (a, b) {
+      var x = byAgent.get(a)[0], y = byAgent.get(b)[0];
+      return x.type.localeCompare(y.type) || x.instance.localeCompare(y.instance);
     });
 
-    agents.forEach(function (agent, index) {
+    var seenPerType = new Map();
+
+    order.forEach(function (agent) {
+      var desired = byAgent.get(agent);
+      var art0 = desired[0];
       var roll = rolls.get(agent);
       if (!roll) {
-        roll = buildRoll(agent);
+        roll = buildRoll(art0);
         rolls.set(agent, roll);
+        els.rolls.appendChild(roll.el);
       }
-      // keep columns in sorted order
-      var current = els.rolls.children[index];
-      if (current !== roll.el) els.rolls.insertBefore(roll.el, current || null);
 
-      var stick = els.follow.checked && atBottom(roll.body);
+      var ordinal = seenPerType.get(art0.type) || 0;
+      seenPerType.set(art0.type, ordinal + 1);
+      roll.color = rollColor(art0.type, ordinal);
+      roll.dotEl.style.background = roll.color;
+
+      var rec = recs.get(agent);
+      roll.arts = desired;
+      roll.count = desired.length;
+      roll.live = rec ? !!rec.live : false;
+      roll.lastChange = rec ? rec.lastChange : art0.mtime;
+
       var arrived = 0;
-
-      var desired = byAgent.get(agent);
       desired.forEach(function (art, position) {
         var entry = cards.get(art.id);
         if (!entry) {
@@ -540,27 +795,77 @@
           void entry.el.offsetWidth;         // restart the flash animation
           entry.el.classList.add("updated");
         }
-        var at = roll.body.children[position];
-        if (at !== entry.el) roll.body.insertBefore(entry.el, at || null);
+        var at = roll.inner.children[position];
+        if (at !== entry.el) roll.inner.insertBefore(entry.el, at || null);
       });
 
       roll.countEl.textContent = desired.length;
+      paintState(roll);
 
       if (arrived) {
-        if (stick) {
+        roll.flash = true;
+        var watching = agent === selected;
+        if (watching && els.follow.checked && roll.stick) {
           roll.body.scrollTop = roll.body.scrollHeight;
         } else {
           roll.pending += arrived;
           roll.jumpEl.textContent = roll.pending + " new ↓";
-          roll.jumpEl.hidden = false;
+          roll.jumpEl.hidden = !watching;    // hidden panes speak through the tab
         }
       }
     });
 
+    // keep the panes in the same order as the tabs
+    order.forEach(function (agent, i) {
+      var roll = rolls.get(agent);
+      var at = els.rolls.children[i];
+      if (at !== roll.el) els.rolls.insertBefore(roll.el, at || null);
+    });
+
+    // Nothing selected (first load, or the roll you were reading was deleted):
+    // fall on the roll that wrote most recently, preferring a live one.
+    if (!selected || !rolls.has(selected)) {
+      var best = null;
+      order.forEach(function (agent) {
+        var roll = rolls.get(agent);
+        if (!best || (roll.live && !best.live) ||
+            (roll.live === best.live && roll.lastChange > best.lastChange)) {
+          best = roll;
+        }
+      });
+      selected = best ? best.agent : null;
+      if (best) { best.stick = true; best.pending = 0; best.jumpEl.hidden = true; }
+    }
+
+    rolls.forEach(function (roll) {
+      roll.el.hidden = roll.agent !== selected;
+    });
+    // A pane that was hidden could not scroll while it grew; land it at the
+    // newest artifact now that it is on screen.
+    var current = selected && rolls.get(selected);
+    if (current && current.stick && els.follow.checked) {
+      current.body.scrollTop = current.body.scrollHeight;
+    }
+
+    var types = new Set(), liveCount = 0;
+    artifacts.forEach(function (a) { types.add(a.type); });
+    rolls.forEach(function (roll) { if (roll.live) liveCount++; });
+
     els.counts.textContent = artifacts.length + (artifacts.length === 1 ? " artifact" : " artifacts")
-      + " · " + agents.length + (agents.length === 1 ? " agent" : " agents");
+      + " · " + order.length + (order.length === 1 ? " roll" : " rolls")
+      + " · " + types.size + (types.size === 1 ? " type" : " types")
+      + " · " + liveCount + " live";
     els.empty.classList.toggle("show", artifacts.length === 0);
+
+    syncTabs();
+    syncSide();
     primed = true;
+  }
+
+  function paintState(roll) {
+    roll.stateEl.className = "roll-state" + (roll.live ? " on" : "");
+    roll.stateEl.textContent = roll.live ? "writing" : "quiet · " + relTime(roll.lastChange);
+    roll.stateEl.dataset.change = roll.lastChange;
   }
 
   // --------------------------------------------------------------- overlay
@@ -583,8 +888,54 @@
   }
 
   els.overlayClose.addEventListener("click", closeOverlay);
+
+  // ------------------------------------------------------------- chrome + keys
+
+  function toggleSide(show) {
+    var off = show == null ? !document.body.classList.contains("side-off") : !show;
+    document.body.classList.toggle("side-off", off);
+    els.sideToggle.classList.toggle("off", off);
+    try { localStorage.setItem("ar.side", off ? "0" : "1"); } catch (e) { /* private mode */ }
+  }
+
+  els.sideToggle.addEventListener("click", function () { toggleSide(); });
+  els.sideFilter.addEventListener("input", syncSide);
+  els.sideFilter.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") { els.sideFilter.value = ""; syncSide(); els.sideFilter.blur(); }
+  });
+
+  try {
+    if (localStorage.getItem("ar.side") === "0") toggleSide(false);
+  } catch (e) { /* private mode */ }
+
   document.addEventListener("keydown", function (ev) {
-    if (ev.key === "Escape" && !els.overlay.hidden) closeOverlay();
+    if (ev.key === "Escape" && !els.overlay.hidden) { closeOverlay(); return; }
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    var t = ev.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (!els.overlay.hidden) return;
+
+    if (ev.key === "\\") { toggleSide(); ev.preventDefault(); return; }
+    if (ev.key === "/") {
+      toggleSide(true);
+      els.sideFilter.focus();
+      els.sideFilter.select();
+      ev.preventDefault();
+      return;
+    }
+    if (ev.key === "ArrowRight" || ev.key === "]") { stepTab(1); ev.preventDefault(); return; }
+    if (ev.key === "ArrowLeft" || ev.key === "[") { stepTab(-1); ev.preventDefault(); return; }
+    if (/^[1-9]$/.test(ev.key)) {
+      var list = tabOrder();
+      var pick = list[Number(ev.key) - 1];
+      if (pick) { select(pick); ev.preventDefault(); }
+    }
+  });
+
+  els.follow.addEventListener("change", function () {
+    if (!els.follow.checked) return;
+    var roll = selected && rolls.get(selected);
+    if (roll) toBottom(roll);
   });
 
   // ---------------------------------------------------------------- stream
@@ -600,7 +951,9 @@
     source.addEventListener("snapshot", function (ev) {
       setStatus("live", "live");
       try {
-        apply(JSON.parse(ev.data).artifacts);
+        var data = JSON.parse(ev.data);
+        if (data.now) skew = Date.now() / 1000 - data.now;
+        apply(data.artifacts, data.rolls);
       } catch (e) {
         console.error("bad snapshot", e);
       }
@@ -616,7 +969,8 @@
     .then(function (data) {
       els.root.textContent = data.root;
       els.emptyRoot.textContent = data.root;
-      apply(data.artifacts);
+      if (data.now) skew = Date.now() / 1000 - data.now;
+      apply(data.artifacts, data.rolls);
       connect();
     })
     .catch(function (e) {
@@ -628,6 +982,12 @@
   setInterval(function () {
     cards.forEach(function (entry) {
       entry.sub.textContent = relTime(entry.art.mtime);
+    });
+    rolls.forEach(function (roll) {
+      if (!roll.el.hidden) paintState(roll);
+    });
+    els.sideList.querySelectorAll(".side-ago[data-change]").forEach(function (node) {
+      if (node.textContent !== "live") node.textContent = relTime(Number(node.dataset.change));
     });
   }, 10000);
 
