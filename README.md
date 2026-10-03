@@ -92,20 +92,23 @@ you draw lands in the roll as a PNG the agent can read:
 
 ```
 artifacts/
-  sketches/                                   ← you are an agent type too
-    me/                                       ← and this is your roll
-      20261003-143022-fix-the-header.note.md  ← your note, if you wrote one
-      20261003-143022-fix-the-header.png      ← the drawing
+  sketches/                             ← you are an agent type too
+    2026-10-03/                         ← a day's sketching is one roll
+      14-30-22-fix-the-header.note.md   ← your note, if you wrote one
+      14-30-22-fix-the-header.png       ← the drawing
+    2026-10-04/                         ← tomorrow starts a fresh one
+      09-12-05.png
 ```
 
 It obeys the same two-level contract as everything else — it has to, or the
-scanner would not see it. Sending always marks the roll as freshly written, so
-it takes a tab and the page jumps to it; your sketch is on screen, not behind a
-badge.
+scanner would not see it — and the instance means what it means for an agent:
+one session's work. Today's roll is live while you draw, so it takes a tab and
+the page jumps to it; past days sit in the archive under their date. Sending
+always counts as a write, so your sketch is on screen, not behind a badge.
 
 Then just say it:
 
-> look at the newest sketch in `artifacts/sketches/me/` and fix what I circled
+> look at the newest sketch in `artifacts/sketches/` and fix what I circled
 
 The note you type becomes the filename slug *and* a small markdown card above the
 sketch, so the intent survives into the roll rather than living only in chat.
@@ -125,7 +128,8 @@ you were drawing on (`annotating researcher/r-02/chart.svg`). You can also paste
 | close | `esc` |
 
 Sketching is on by default. `--no-sketch` turns the endpoint off and hides the
-button; `--inbox TYPE/ID` moves the roll it writes to.
+button; `--inbox TYPE` renames the type it writes under (the date is always
+the instance).
 
 ## Tabs, and the archive
 
@@ -179,7 +183,8 @@ ever ran in it.
 --live-window S how long after its last write a roll keeps its tab
                                             (default: 120; 0 = never expires)
 --token STR     require ?t=STR on first load, then cookie-based
---inbox TYPE/ID roll that sketches are written to  (default: sketches/me)
+--inbox TYPE    type sketches are written under; the roll is <TYPE>/<date>
+                                            (default: sketches)
 --no-sketch     refuse sketch uploads; serve read-only
 -v              log every request
 ```
@@ -230,8 +235,9 @@ Then browse `http://127.0.0.1:8787/` locally.
 - The height-reporting probe script is injected into the *response* only when
   the roll requests `?probe=1`. Files on disk are never modified.
 - `/api/sketch` is the only route that writes. It writes nothing but a PNG (magic
-  bytes checked) and its note, into `<root>/<inbox>/` (a validated `type/id`
-  pair, never anything deeper) under a server-generated
+  bytes checked) and its note, into `<root>/<inbox>/<date>/` (a validated plain
+  name plus a server-generated date, never anything from the request) under a
+  server-generated
   name — no part of the request reaches a path. It requires an `X-Artifact-Roll`
   header, which a cross-origin page cannot set without a preflight the server
   does not answer, and rejects a non-same-origin `Sec-Fetch-Site`. `--token`

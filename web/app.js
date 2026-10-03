@@ -999,7 +999,7 @@
   var COLORS = ["#e5484d", "#3b82f6", "#22c55e", "#f5a524", "#111827", "#ffffff"];
 
   var sketchEnabled = false;
-  var inboxName = "sketches/me";
+  var inboxName = "sketches";
 
   var pad = {
     open: false,
@@ -1332,7 +1332,7 @@
     }).then(function (data) {
       if (!data.ok) throw new Error(data.error || "rejected");
       padStatus("wrote " + data.path, "ok");
-      pendingSelect = data.path.split("/").slice(0, 2).join("/");
+      pendingSelect = data.roll;
       els.padNote.value = "";
       pad.strokes = [];
       padRebuild();
@@ -1404,7 +1404,7 @@
       sketchEnabled = !!data.sketch;
       inboxName = data.inbox || inboxName;
       els.sketchOpen.hidden = !sketchEnabled;
-      els.sketchOpen.title = "sketch something for the agent (s) → " + inboxName + "/";
+      els.sketchOpen.title = "sketch something for the agent (s) → " + inboxName + "/<today>/";
       apply(data.artifacts, data.rolls);
       connect();
     })

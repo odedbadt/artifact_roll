@@ -35,10 +35,11 @@ WEB_DIR = os.path.join(HERE, "web")
 IGNORED_NAMES = {"__pycache__", "node_modules", ".git", ".DS_Store", "Thumbs.db"}
 INDEX_NAMES = ("index.html", "index.htm")
 
-# The inbox is a roll like any other, so it has to be <type>/<instance> deep --
-# a single directory under the root is not scanned at all.  You are the agent
-# here; "me" is the instance you keep writing to.
-DEFAULT_INBOX = "sketches/me"
+# The inbox is a roll like any other: <type>/<instance>.  --inbox names the type;
+# the instance is the date, so a day's sketching is one roll -- live while you
+# are drawing, a dated entry in the archive afterwards.  That is the same thing
+# an instance means for an agent: one session's worth of work.
+DEFAULT_INBOX = "sketches"
 MAX_SKETCH_BYTES = 16 * 1024 * 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -376,9 +377,13 @@ class Scanner(threading.Thread):
 
 
 def valid_inbox(inbox: str) -> bool:
-    """An inbox must name a roll: exactly <type>/<instance>, both plain names."""
-    parts = inbox.split("/")
-    return len(parts) == 2 and all(SAFE_NAME_RE.match(p) for p in parts)
+    """--inbox names the roll's type; the instance is filled in per day."""
+    return bool(SAFE_NAME_RE.match(inbox))
+
+
+def inbox_roll(inbox: str, when: float | None = None) -> str:
+    """The <type>/<instance> roll a sketch written now belongs to."""
+    return inbox + "/" + time.strftime("%Y-%m-%d", time.localtime(when))
 
 
 def slugify(text: str, limit: int = 48) -> str:
@@ -419,11 +424,14 @@ def unique_path(directory: str, stem: str, ext: str) -> tuple[str, str]:
 
 
 def write_sketch(root: str, inbox: str, png: bytes, note: str, target: str) -> dict:
-    """Drop a sketch (and, if there is a note, a sidecar .md) into the inbox roll."""
-    directory = os.path.join(root, *inbox.split("/"))
+    """Drop a sketch (and, if there is a note, a sidecar .md) into today's roll."""
+    roll = inbox_roll(inbox)
+    directory = os.path.join(root, *roll.split("/"))
     os.makedirs(directory, exist_ok=True)
 
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    # The roll directory already carries the date, so the file only needs the
+    # time of day.
+    stamp = time.strftime("%H-%M-%S")
     slug = slugify(note)
     stem = f"{stamp}-{slug}" if slug else stamp
 
@@ -443,15 +451,16 @@ def write_sketch(root: str, inbox: str, png: bytes, note: str, target: str) -> d
         lines = [note.strip() or "_(no note)_", "", trail]
         with open(note_full, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
-        written.append(rel_posix(os.path.join(inbox, stem + ".note.md")))
+        written.append(rel_posix(os.path.join(roll, stem + ".note.md")))
 
     with open(img_full, "wb") as fh:
         fh.write(png)
-    written.append(rel_posix(os.path.join(inbox, img_name)))
+    written.append(rel_posix(os.path.join(roll, img_name)))
 
     return {
         "ok": True,
-        "path": rel_posix(os.path.join(inbox, img_name)),
+        "path": rel_posix(os.path.join(roll, img_name)),
+        "roll": roll,
         "abs": img_full,
         "bytes": len(png),
         "written": written,
@@ -742,7 +751,7 @@ def serve(root: str, host: str, port: int, interval: float, live_window: float,
     if host in ("0.0.0.0", "::"):
         print(f"               http://127.0.0.1:{port}/{suffix}  (local)", flush=True)
     if inbox:
-        print(f"               sketches -> {os.path.join(root, inbox)}", flush=True)
+        print(f"               sketches -> {os.path.join(root, inbox)}/<date>/", flush=True)
     else:
         print("               sketching disabled", flush=True)
     window = f"{live_window:g}s" if live_window > 0 else "never (always live)"
@@ -767,8 +776,9 @@ def main() -> None:
     ap.add_argument("--live-window", type=float, default=120.0, metavar="SECS",
                     help="how long after its last write a roll keeps its tab (0 = forever)")
     ap.add_argument("--token", default=None, help="require ?t=TOKEN before serving anything")
-    ap.add_argument("--inbox", default=DEFAULT_INBOX, metavar="TYPE/ID",
-                    help=f"roll that browser sketches are written to (default: {DEFAULT_INBOX})")
+    ap.add_argument("--inbox", default=DEFAULT_INBOX, metavar="TYPE",
+                    help="agent type that browser sketches are written under; the roll "
+                         f"is <TYPE>/<date> (default: {DEFAULT_INBOX})")
     ap.add_argument("--no-sketch", dest="sketch", action="store_false",
                     help="refuse sketch uploads; serve read-only")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every request")
@@ -776,7 +786,7 @@ def main() -> None:
 
     inbox = args.inbox if args.sketch else None
     if inbox is not None and not valid_inbox(inbox):
-        ap.error("--inbox must be <type>/<instance> (letters, digits, . _ -)")
+        ap.error("--inbox must be a plain name (letters, digits, . _ -)")
 
     serve(args.root, args.host, args.port, args.poll, args.live_window,
           args.token, args.verbose, inbox)
