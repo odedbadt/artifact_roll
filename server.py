@@ -2,10 +2,15 @@
 """artifact_roll -- a thin server that streams a directory of artifacts to a browser.
 
 Point it at a directory that agents dump files into.  The tree is two levels
-deep: <root>/<agent-type>/<agent-id>/.  A type is a class of agent (architect,
-builder, ...); an id is one running instance of it.  Each <type>/<id> pair is a
-"roll" of its own, so two architects working at once never mix.  Below that,
-each file (or each sub-directory holding an index.html) is an artifact.
+deep: <root>/<workspace>/<agent-id>/.  The first level says where the work is
+(a checkout: "project" or "project.worktree"); the second is one agent working
+there.  Each pair is a "roll" of its own, so two agents running at once never
+mix.  Below that, each file (or each sub-directory holding an index.html) is an
+artifact.
+
+The server attaches no meaning to either level -- it only requires that there
+are two.  What they mean is the convention in README.md and the artifact-roll
+skill; "type" below is just the first level's name in the code.
 
 The channel runs both ways: the browser can POST a canvas sketch to
 /api/sketch, which lands as a PNG in a roll of its own for an agent to read.

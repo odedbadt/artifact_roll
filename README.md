@@ -30,42 +30,55 @@ python3 server.py --root /var/www/artifact_roll --host 0.0.0.0 --port 8787
 
 ## The directory convention
 
-**`<agent-type>/<agent-id>/` — two levels, and that's the whole contract.** The
-first level is the class of agent (`architect`, `builder`, `reviewer`); the
-second is one running instance of it. Every `type/id` pair gets its own roll,
-oldest artifact at the top, newest at the bottom — so two architects working at
-the same time never write into each other's roll.
+**`<workspace>/<agent-id>/` — two levels, and that's the whole contract.** The
+first level says *where the work is*; the second is one agent working there.
+Every pair gets its own roll, oldest artifact at the top, newest at the bottom,
+so two agents running at once never write into each other's roll.
 
 ```
-~/Sites/artifacts/     ← the root
-  researcher/          ← agent type
-    r-01/              ← one instance: a roll
+~/Sites/artifacts/                   ← the root
+  artifact_roll.communicate_back/    ← a checkout: project.worktree
+    reviewer-01/                     ← one agent: a roll
       findings.md
-      dashboard/       ← a directory with an index.html is ONE artifact
+      dashboard/                     ← a dir with an index.html is ONE artifact
         index.html
         style.css
-    r-02/              ← a second researcher, running concurrently: its own roll
+    scout-02/                        ← a second agent on the same checkout
       chart.svg
       metrics.csv
-  reviewer/            ← another type
-    v-01/
+  some-other-project/                ← a different workspace
+    builder-01/
       verdict.json
+  sketches/                          ← yours, not an agent's
+    2026-10-03/
+      19-54-29.png
 ```
 
-Rolls are ordered by type and then by id, so a type's instances stay adjacent.
-They share the type's colour and differ in shade.
+`<workspace>` is derived from the checkout, not from what kind of agent is
+writing: the main checkout of a repo is `project`, a linked worktree is
+`project.worktree`, anything outside a repo is the directory's own name. A role
+(`reviewer`, `scout`) is a useful *label* on the agent id and a useless way to
+group — you recognise your projects, not an adjective an agent picked for
+itself. So everything about one checkout shares a workspace, and a colour.
 
-Only files at or below `<type>/<id>/` are artifacts. Loose files directly under
-the root or under a type directory belong to no instance, so they are skipped
-rather than guessed into a roll. Dotfiles, `node_modules`, and `__pycache__` are
-ignored. Files inside an `index.html` directory are served as that artifact's
-assets, not as separate cards.
+`<agent-id>` is one run. Lead it with the role and number it, so concurrent
+siblings never collide: `reviewer-01`, `scout-02`.
+
+Rolls are ordered by workspace then id, so one checkout's agents stay adjacent.
+They share the workspace's colour and differ in shade.
+
+Only files at or below `<workspace>/<agent-id>/` are artifacts. Loose files
+directly under the root or under a workspace directory belong to no agent, so
+they are skipped rather than guessed into a roll. Dotfiles, `node_modules`, and
+`__pycache__` are ignored. Files inside an `index.html` directory are served as
+that artifact's assets, not as separate cards.
 
 Point Claude at it by telling each agent where to write:
 
 ```
-Write every artifact you produce to ~/Sites/artifacts/<your-agent-type>/<your-agent-id>/,
-one file per artifact. Use .md, .svg, .html, .csv, or .json.
+Write every artifact you produce to ~/Sites/artifacts/<workspace>/<your-agent-id>/,
+where <workspace> is the project (or project.worktree) you are working in and
+<your-agent-id> is your role plus a number. One file per artifact.
 ```
 
 ## What renders
