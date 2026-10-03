@@ -8,10 +8,21 @@ file slides in at the bottom of that agent's roll. No build step, no
 dependencies, stdlib Python only.
 
 ```
-python3 server.py --root ./artifacts --host 0.0.0.0 --port 8787
+python3 server.py
 ```
 
-Then open `http://<host>:8787/`.
+Then open `http://127.0.0.1:8787/`.
+
+With no `--root`, artifacts live in the **per-user web root** — `~/Sites/artifacts`
+on macOS, `~/public_html/artifacts` elsewhere (Apache's `mod_userdir` spot),
+created on first run. `$ARTIFACT_ROLL_ROOT` overrides that, so the server and
+whatever is writing can agree on a root without passing `--root` around. That is a conventional place for files a local server
+hands out, and it keeps a directory agents write into out of the checkout.
+Point it anywhere else with `--root`, and use `--host 0.0.0.0` to expose it:
+
+```
+python3 server.py --root /var/www/artifact_roll --host 0.0.0.0 --port 8787
+```
 
 ## The directory convention
 
@@ -22,7 +33,7 @@ oldest artifact at the top, newest at the bottom — so two architects working a
 the same time never write into each other's roll.
 
 ```
-artifacts/
+~/Sites/artifacts/     ← the root
   researcher/          ← agent type
     r-01/              ← one instance: a roll
       findings.md
@@ -49,7 +60,7 @@ assets, not as separate cards.
 Point Claude at it by telling each agent where to write:
 
 ```
-Write every artifact you produce to ./artifacts/<your-agent-type>/<your-agent-id>/,
+Write every artifact you produce to ~/Sites/artifacts/<your-agent-type>/<your-agent-id>/,
 one file per artifact. Use .md, .svg, .html, .csv, or .json.
 ```
 
@@ -114,7 +125,10 @@ ever ran in it.
 ## Options
 
 ```
---root PATH     directory to watch          (default: ./artifacts)
+--root PATH     directory to watch          (default: $ARTIFACT_ROLL_ROOT, else
+                                             ~/Sites/artifacts on macOS,
+                                             ~/public_html/artifacts elsewhere;
+                                             created if missing)
 --host ADDR     bind address                (default: 127.0.0.1; use 0.0.0.0 to expose)
 --port N        port                        (default: 8787)
 --poll SECS     filesystem poll interval    (default: 0.5)
@@ -122,6 +136,31 @@ ever ran in it.
                                             (default: 120; 0 = never expires)
 --token STR     require ?t=STR on first load, then cookie-based
 -v              log every request
+```
+
+## Running it at login (macOS)
+
+A launch agent keeps it up so the page is always there to open. Installed as
+`~/Library/LaunchAgents/com.odedbadt.artifact-roll.plist`:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.odedbadt.artifact-roll.plist
+launchctl list | grep artifact-roll      # <pid> 0 com.odedbadt.artifact-roll
+tail -f ~/Library/Logs/artifact-roll.log
+```
+
+It runs `/usr/bin/python3` — the system interpreter, on purpose, so a rebuilt
+conda/micromamba environment can't break startup — with `RunAtLoad` and
+`KeepAlive`, bound to `127.0.0.1:8787`. It passes no `--root`, so the server
+resolves the same default an agent does; setting `ARTIFACT_ROLL_ROOT` in your
+shell profile would move the agents but **not** the launch agent, which does not
+read your profile. Pin both or neither.
+
+To stop or remove it:
+
+```bash
+launchctl bootout gui/$(id -u)/com.odedbadt.artifact-roll
+rm ~/Library/LaunchAgents/com.odedbadt.artifact-roll.plist
 ```
 
 ## Running it remotely
