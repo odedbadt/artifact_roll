@@ -574,10 +574,7 @@
     tab.setAttribute("role", "tab");
     tab.dataset.agent = roll.agent;
     tab.appendChild(el("span", "tab-dot"));
-    var label = el("span", "tab-label");
-    label.appendChild(el("span", "tab-type", roll.type));
-    label.appendChild(el("span", "tab-inst", roll.instance));
-    tab.appendChild(label);
+    tab.appendChild(el("span", "tab-inst", roll.instance));
     var badge = el("span", "tab-badge");
     badge.hidden = true;
     tab.appendChild(badge);
@@ -610,6 +607,22 @@
   // A tab exists only for a roll something is actively writing to.  The one
   // exception is whatever you are currently reading: it keeps its tab (dimmed)
   // after going quiet, so the page never shows a pane with nothing above it.
+  //
+  // Tabs are grouped by workspace, which is written once above its tabs rather
+  // than repeated in each -- several agents on one checkout is the common case,
+  // and the workspace is the long half of the name.
+  var tabGroups = new Map();          // workspace -> {el, tabsEl}
+
+  function buildTabGroup(workspace) {
+    var box = el("div", "tab-group");
+    box.dataset.workspace = workspace;
+    var label = el("span", "tab-ws", workspace);
+    label.title = workspace;
+    var strip = el("div", "tab-group-tabs");
+    box.append(label, strip);
+    return { el: box, tabsEl: strip };
+  }
+
   function syncTabs() {
     var want = order.filter(function (agent) {
       var roll = rolls.get(agent);
@@ -625,11 +638,40 @@
       }
     });
 
-    want.forEach(function (agent, i) {
+    // `order` is sorted by workspace then id, so a workspace's tabs are already
+    // contiguous and the run of distinct names is the group order.
+    var groupOrder = [];
+    want.forEach(function (agent) {
+      var ws = rolls.get(agent).type;
+      if (groupOrder[groupOrder.length - 1] !== ws) groupOrder.push(ws);
+    });
+
+    tabGroups.forEach(function (group, ws) {
+      if (groupOrder.indexOf(ws) < 0) {
+        group.el.remove();
+        tabGroups.delete(ws);
+      }
+    });
+
+    groupOrder.forEach(function (ws, i) {
+      var group = tabGroups.get(ws);
+      if (!group) {
+        group = buildTabGroup(ws);
+        tabGroups.set(ws, group);
+      }
+      var at = els.tabs.children[i];
+      if (at !== group.el) els.tabs.insertBefore(group.el, at || null);
+    });
+
+    var filled = new Map();
+    want.forEach(function (agent) {
       var roll = rolls.get(agent);
       if (!roll.tabEl) buildTab(roll);
-      var at = els.tabs.children[i];
-      if (at !== roll.tabEl) els.tabs.insertBefore(roll.tabEl, at || null);
+      var group = tabGroups.get(roll.type);
+      var i = filled.get(roll.type) || 0;
+      filled.set(roll.type, i + 1);
+      var at = group.tabsEl.children[i];
+      if (at !== roll.tabEl) group.tabsEl.insertBefore(roll.tabEl, at || null);
       paintTab(roll);
     });
 
@@ -894,13 +936,13 @@
       current.body.scrollTop = current.body.scrollHeight;
     }
 
-    var types = new Set(), liveCount = 0;
-    artifacts.forEach(function (a) { types.add(a.type); });
+    var spaces = new Set(), liveCount = 0;
+    artifacts.forEach(function (a) { spaces.add(a.type); });
     rolls.forEach(function (roll) { if (roll.live) liveCount++; });
 
     els.counts.textContent = artifacts.length + (artifacts.length === 1 ? " artifact" : " artifacts")
       + " · " + order.length + (order.length === 1 ? " roll" : " rolls")
-      + " · " + types.size + (types.size === 1 ? " type" : " types")
+      + " · " + spaces.size + (spaces.size === 1 ? " workspace" : " workspaces")
       + " · " + liveCount + " live";
     els.empty.classList.toggle("show", artifacts.length === 0);
 
