@@ -31,13 +31,31 @@
     overlayTitle: document.getElementById("overlay-title"),
     overlayBody: document.getElementById("overlay-body"),
     overlayRaw: document.getElementById("overlay-raw"),
-    overlayClose: document.getElementById("overlay-close")
+    overlayClose: document.getElementById("overlay-close"),
+    sketchOpen: document.getElementById("sketch-open"),
+    pad: document.getElementById("sketchpad"),
+    padTarget: document.getElementById("pad-target"),
+    padTool: document.getElementById("pad-tool"),
+    padColor: document.getElementById("pad-color"),
+    padSize: document.getElementById("pad-size"),
+    padUndo: document.getElementById("pad-undo"),
+    padClear: document.getElementById("pad-clear"),
+    padBlank: document.getElementById("pad-blank"),
+    padClose: document.getElementById("pad-close"),
+    padStage: document.getElementById("pad-stage"),
+    padCanvases: document.getElementById("pad-canvases"),
+    padBg: document.getElementById("pad-bg"),
+    padInk: document.getElementById("pad-ink"),
+    padNote: document.getElementById("pad-note"),
+    padStatus: document.getElementById("pad-status"),
+    padSend: document.getElementById("pad-send")
   };
 
   var cards = new Map();   // artifact id -> {el, art, body, sub}
   var rolls = new Map();   // "type/id" -> roll entry (see buildRoll)
   var order = [];          // agents, in tab / archive order
   var selected = null;     // agent whose pane is on screen
+  var pendingSelect = null; // roll to show as soon as it appears (a sent sketch)
   var primed = false;      // first snapshot renders without the jump-in animation
   var skew = 0;            // clientClock - serverClock, so mtimes read honestly
 
@@ -249,16 +267,25 @@
     fetchText(artUrl(art)).then(function (text) {
       var box = el("div", "md");
       box.innerHTML = markdownToHtml(text);
-      box.querySelectorAll("a[href]").forEach(function (a) {
-        if (!/^(https?:)?\/\//.test(a.getAttribute("href"))) return;
-        a.target = "_blank"; a.rel = "noopener noreferrer";
-      });
-      // Resolve relative images against the artifact's own directory.
+      // Relative hrefs and srcs resolve against the artifact's own directory --
+      // a sibling file it points at, not a path off the roll's own origin.
       var base = art.entry.split("/").slice(0, -1).join("/");
+      function sibling(ref) { return rawUrl(base ? base + "/" + ref : ref); }
+
+      box.querySelectorAll("a[href]").forEach(function (a) {
+        var href = a.getAttribute("href");
+        if (/^(https?:)?\/\//.test(href)) {
+          a.target = "_blank"; a.rel = "noopener noreferrer";
+          return;
+        }
+        if (/^([a-z][a-z0-9+.-]*:|#|\/)/i.test(href)) return;
+        a.href = sibling(href);
+        a.target = "_blank"; a.rel = "noopener";
+      });
       box.querySelectorAll("img[src]").forEach(function (img) {
         var src = img.getAttribute("src");
         if (/^(https?:|data:|\/)/.test(src)) return;
-        img.src = rawUrl(base ? base + "/" + src : src);
+        img.src = sibling(src);
       });
       host.replaceChildren(box);
       typesetMath(box);
@@ -462,6 +489,15 @@
     open.rel = "noopener";
 
     actions.append(collapse, expand, open);
+
+    // A sketch on top of what the agent drew closes the loop: raster artifacts
+    // can be pulled straight into the pad as a background.
+    if (sketchEnabled && (art.kind === "image" || art.kind === "svg")) {
+      var scribble = el("button", "icon-btn", "✎");
+      scribble.title = "sketch on top of this";
+      scribble.addEventListener("click", function () { openSketch(art); });
+      actions.insertBefore(scribble, expand);
+    }
     head.appendChild(actions);
 
     title.addEventListener("click", function () { openOverlay(art); });
@@ -822,6 +858,17 @@
       if (at !== roll.el) els.rolls.insertBefore(roll.el, at || null);
     });
 
+    // A sketch you just sent: jump to its roll the moment the scanner sees it,
+    // so the thing you drew is on screen rather than behind a tab badge.
+    if (pendingSelect && rolls.has(pendingSelect)) {
+      var landed = rolls.get(pendingSelect);
+      selected = pendingSelect;
+      pendingSelect = null;
+      landed.stick = true;              // the sketch is the newest thing in it
+      landed.pending = 0;
+      landed.jumpEl.hidden = true;
+    }
+
     // Nothing selected (first load, or the roll you were reading was deleted):
     // fall on the roll that wrote most recently, preferring a live one.
     if (!selected || !rolls.has(selected)) {
@@ -909,7 +956,8 @@
   } catch (e) { /* private mode */ }
 
   document.addEventListener("keydown", function (ev) {
-    if (ev.key === "Escape" && !els.overlay.hidden) { closeOverlay(); return; }
+    if (ev.key === "Escape" && !els.overlay.hidden && !pad.open) { closeOverlay(); return; }
+    if (pad.open) return;                 // the pad owns the keyboard while it is up
     if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
     var t = ev.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
@@ -936,6 +984,389 @@
     if (!els.follow.checked) return;
     var roll = selected && rolls.get(selected);
     if (roll) toBottom(roll);
+  });
+
+  // ------------------------------------------------------------- sketch pad
+  //
+  // The reverse channel.  Two stacked canvases: `bg` holds the sheet (white, or
+  // an artifact pulled in to annotate) and `ink` holds the strokes.  Strokes are
+  // kept as vectors so undo can replay them, and committed into an offscreen
+  // canvas so a shape drag only has to repaint one bitmap plus its preview.
+
+  var SHEET = { w: 1600, h: 1000 };     // blank sheet, in canvas pixels
+  var BG_CAP = { w: 2000, h: 1400 };    // ceiling for a pulled-in background
+  var BG_MIN_EDGE = 1200;               // floor, so a small SVG is still drawable
+  var COLORS = ["#e5484d", "#3b82f6", "#22c55e", "#f5a524", "#111827", "#ffffff"];
+
+  var sketchEnabled = false;
+  var inboxName = "sketches/me";
+
+  var pad = {
+    open: false,
+    tool: "pen",
+    color: COLORS[0],
+    size: 5,
+    w: SHEET.w,
+    h: SHEET.h,
+    bgImage: null,       // HTMLImageElement, or null for a blank sheet
+    target: "",          // artifact path being annotated, for the note
+    strokes: [],
+    drawing: null,
+    sending: false
+  };
+
+  var inkCtx = els.padInk.getContext("2d");
+  var bgCtx = els.padBg.getContext("2d");
+  var committed = document.createElement("canvas");
+  var commitCtx = committed.getContext("2d");
+
+  function padSheetSize(img) {
+    if (!img) return { w: SHEET.w, h: SHEET.h };
+    var w = img.naturalWidth || SHEET.w, h = img.naturalHeight || SHEET.h;
+    var longEdge = Math.max(w, h);
+    // Blow a small artifact up -- an SVG at its intrinsic size leaves no room to
+    // draw on -- then clamp so a big screenshot still fits the ceiling.
+    var scale = longEdge < BG_MIN_EDGE ? BG_MIN_EDGE / longEdge : 1;
+    scale = Math.min(scale, BG_CAP.w / w, BG_CAP.h / h);
+    return { w: Math.max(1, Math.round(w * scale)), h: Math.max(1, Math.round(h * scale)) };
+  }
+
+  function padResetSheet(img) {
+    var size = padSheetSize(img);
+    pad.bgImage = img || null;
+    pad.w = size.w;
+    pad.h = size.h;
+    pad.strokes = [];
+    pad.drawing = null;
+
+    [els.padBg, els.padInk, committed].forEach(function (c) {
+      c.width = pad.w;
+      c.height = pad.h;
+    });
+
+    // A white sheet under everything: the agent reads this as an image, and
+    // transparency would land on whatever background its viewer happens to use.
+    bgCtx.fillStyle = "#ffffff";
+    bgCtx.fillRect(0, 0, pad.w, pad.h);
+    if (pad.bgImage) bgCtx.drawImage(pad.bgImage, 0, 0, pad.w, pad.h);
+
+    padRefreshInk();
+    padFit();
+  }
+
+  // Scale the canvas stack down to whatever room the stage has.
+  function padFit() {
+    var stage = els.padStage.getBoundingClientRect();
+    var room = { w: Math.max(80, stage.width - 32), h: Math.max(80, stage.height - 32) };
+    var scale = Math.min(1, room.w / pad.w, room.h / pad.h);
+    els.padCanvases.style.width = Math.round(pad.w * scale) + "px";
+    els.padCanvases.style.height = Math.round(pad.h * scale) + "px";
+  }
+
+  function padRefreshInk() {
+    inkCtx.clearRect(0, 0, pad.w, pad.h);
+    inkCtx.drawImage(committed, 0, 0);
+  }
+
+  function padRebuild() {
+    commitCtx.clearRect(0, 0, pad.w, pad.h);
+    pad.strokes.forEach(function (stroke) { padPaint(commitCtx, stroke); });
+    padRefreshInk();
+  }
+
+  function padPaint(ctx, stroke) {
+    var pts = stroke.pts;
+    if (!pts.length) return;
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = stroke.size;
+    ctx.strokeStyle = stroke.color;
+    if (stroke.tool === "erase") {
+      // Lifts only the ink -- the sheet below is a separate canvas.
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.strokeStyle = "rgba(0,0,0,1)";
+      ctx.lineWidth = stroke.size * 3;
+    }
+
+    var a = pts[0], b = pts[pts.length - 1];
+    ctx.beginPath();
+    if (stroke.tool === "rect") {
+      ctx.rect(a.x, a.y, b.x - a.x, b.y - a.y);
+    } else if (stroke.tool === "line" || stroke.tool === "arrow") {
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    } else {
+      ctx.moveTo(a.x, a.y);
+      for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      if (pts.length === 1) ctx.lineTo(a.x + 0.01, a.y + 0.01);   // a dot
+    }
+    ctx.stroke();
+
+    if (stroke.tool === "arrow") {
+      var head = Math.max(10, stroke.size * 3.2);
+      var ang = Math.atan2(b.y - a.y, b.x - a.x);
+      if (Math.hypot(b.x - a.x, b.y - a.y) > 2) {
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(b.x - head * Math.cos(ang - 0.42), b.y - head * Math.sin(ang - 0.42));
+        ctx.lineTo(b.x - head * Math.cos(ang + 0.42), b.y - head * Math.sin(ang + 0.42));
+        ctx.closePath();
+        ctx.fillStyle = stroke.color;
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  function padPoint(ev) {
+    var rect = els.padInk.getBoundingClientRect();
+    return {
+      x: (ev.clientX - rect.left) * (pad.w / rect.width),
+      y: (ev.clientY - rect.top) * (pad.h / rect.height)
+    };
+  }
+
+  els.padInk.addEventListener("pointerdown", function (ev) {
+    if (ev.button !== 0 && ev.pointerType === "mouse") return;
+    ev.preventDefault();
+    els.padInk.setPointerCapture(ev.pointerId);
+    pad.drawing = {
+      tool: pad.tool,
+      color: pad.color,
+      size: pad.size,
+      pts: [padPoint(ev)]
+    };
+    padStatus("");
+  });
+
+  els.padInk.addEventListener("pointermove", function (ev) {
+    if (!pad.drawing) return;
+    var pt = padPoint(ev);
+    var free = pad.drawing.tool === "pen" || pad.drawing.tool === "erase";
+    if (free) {
+      // Freehand paints forward only -- no need to repaint what is already down.
+      var prev = pad.drawing.pts[pad.drawing.pts.length - 1];
+      pad.drawing.pts.push(pt);
+      padPaint(inkCtx, { tool: pad.drawing.tool, color: pad.drawing.color,
+                         size: pad.drawing.size, pts: [prev, pt] });
+    } else {
+      pad.drawing.pts[1] = pt;
+      padRefreshInk();
+      padPaint(inkCtx, pad.drawing);
+    }
+  });
+
+  function padFinish(ev) {
+    if (!pad.drawing) return;
+    try { els.padInk.releasePointerCapture(ev.pointerId); } catch (e) { /* already gone */ }
+    pad.strokes.push(pad.drawing);
+    padPaint(commitCtx, pad.drawing);
+    pad.drawing = null;
+    padRefreshInk();
+  }
+  els.padInk.addEventListener("pointerup", padFinish);
+  els.padInk.addEventListener("pointercancel", padFinish);
+
+  // -- chrome ----------------------------------------------------------
+
+  COLORS.forEach(function (hex, i) {
+    var swatch = el("button", "tool swatch" + (i === 0 ? " on" : ""));
+    swatch.style.background = hex;
+    swatch.title = hex;
+    swatch.addEventListener("click", function () {
+      pad.color = hex;
+      els.padColor.querySelectorAll(".swatch").forEach(function (s) {
+        s.classList.toggle("on", s === swatch);
+      });
+      if (pad.tool === "erase") padSetTool("pen");
+    });
+    els.padColor.appendChild(swatch);
+  });
+
+  function padSetTool(name) {
+    pad.tool = name;
+    els.padTool.querySelectorAll(".tool").forEach(function (b) {
+      b.classList.toggle("on", b.dataset.tool === name);
+    });
+    els.padInk.style.cursor = name === "erase" ? "cell" : "crosshair";
+  }
+
+  els.padTool.addEventListener("click", function (ev) {
+    var btn = ev.target.closest(".tool");
+    if (btn) padSetTool(btn.dataset.tool);
+  });
+
+  els.padSize.addEventListener("input", function () { pad.size = +els.padSize.value; });
+
+  function padUndo() {
+    if (!pad.strokes.length) return;
+    pad.strokes.pop();
+    padRebuild();
+  }
+  els.padUndo.addEventListener("click", padUndo);
+  els.padClear.addEventListener("click", function () { pad.strokes = []; padRebuild(); });
+  els.padBlank.addEventListener("click", function () {
+    pad.target = "";
+    els.padTarget.textContent = "";
+    padResetSheet(null);
+  });
+
+  function padStatus(text, kind) {
+    els.padStatus.className = "pad-status" + (kind ? " " + kind : "");
+    els.padStatus.textContent = text;
+  }
+
+  // -- backgrounds -----------------------------------------------------
+
+  function padLoadBackground(src, target) {
+    padStatus("loading background…");
+    var img = new Image();
+    img.onload = function () {
+      pad.target = target || "";
+      els.padTarget.textContent = pad.target;
+      padResetSheet(img);
+      padStatus("");
+    };
+    img.onerror = function () {
+      padResetSheet(null);
+      padStatus("could not load that image", "bad");
+    };
+    img.src = src;
+  }
+
+  function padLoadFile(file) {
+    if (!file || !/^image\//.test(file.type)) return false;
+    var reader = new FileReader();
+    reader.onload = function () { padLoadBackground(reader.result, file.name || ""); };
+    reader.readAsDataURL(file);
+    return true;
+  }
+
+  ["dragenter", "dragover"].forEach(function (name) {
+    els.padStage.addEventListener(name, function (ev) {
+      ev.preventDefault();
+      els.padStage.classList.add("pad-drop");
+    });
+  });
+  ["dragleave", "drop"].forEach(function (name) {
+    els.padStage.addEventListener(name, function () { els.padStage.classList.remove("pad-drop"); });
+  });
+  els.padStage.addEventListener("drop", function (ev) {
+    ev.preventDefault();
+    var file = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+    if (!padLoadFile(file)) padStatus("drop an image file to annotate it", "bad");
+  });
+
+  document.addEventListener("paste", function (ev) {
+    if (!pad.open || !ev.clipboardData) return;
+    var items = ev.clipboardData.items || [];
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].kind !== "file") continue;
+      var file = items[i].getAsFile();
+      if (padLoadFile(file)) { ev.preventDefault(); return; }
+    }
+  });
+
+  // -- open / close / send ---------------------------------------------
+
+  function openSketch(art) {
+    if (!sketchEnabled) return;
+    pad.open = true;
+    els.pad.hidden = false;
+    padSetTool(pad.tool);
+    padStatus("");
+    els.padSend.disabled = false;
+    if (art) {
+      padLoadBackground(artUrl(art), art.path);
+    } else {
+      pad.target = "";
+      els.padTarget.textContent = "";
+      padResetSheet(null);
+    }
+    els.padNote.focus();
+  }
+
+  function closeSketch() {
+    pad.open = false;
+    els.pad.hidden = true;
+    pad.drawing = null;
+  }
+
+  function padCompose() {
+    var out = document.createElement("canvas");
+    out.width = pad.w;
+    out.height = pad.h;
+    var ctx = out.getContext("2d");
+    ctx.drawImage(els.padBg, 0, 0);
+    ctx.drawImage(committed, 0, 0);
+    return out;
+  }
+
+  function padSend() {
+    if (pad.sending) return;
+    var note = els.padNote.value.trim();
+    if (!pad.strokes.length && !pad.bgImage && !note) {
+      padStatus("nothing to send", "bad");
+      return;
+    }
+    pad.sending = true;
+    els.padSend.disabled = true;
+    padStatus("sending…");
+
+    fetch("/api/sketch", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        // Unsettable cross-origin without a preflight, which the server refuses.
+        "X-Artifact-Roll": "sketch"
+      },
+      body: JSON.stringify({
+        png: padCompose().toDataURL("image/png"),
+        note: note,
+        target: pad.target
+      })
+    }).then(function (r) {
+      return r.json().catch(function () { throw new Error("HTTP " + r.status); });
+    }).then(function (data) {
+      if (!data.ok) throw new Error(data.error || "rejected");
+      padStatus("wrote " + data.path, "ok");
+      pendingSelect = data.path.split("/").slice(0, 2).join("/");
+      els.padNote.value = "";
+      pad.strokes = [];
+      padRebuild();
+      setTimeout(closeSketch, 700);
+    }).catch(function (err) {
+      padStatus(String(err.message || err), "bad");
+    }).then(function () {
+      pad.sending = false;
+      els.padSend.disabled = false;
+    });
+  }
+
+  els.padSend.addEventListener("click", padSend);
+  els.padClose.addEventListener("click", closeSketch);
+  els.sketchOpen.addEventListener("click", function () { openSketch(null); });
+  window.addEventListener("resize", function () { if (pad.open) padFit(); });
+
+  document.addEventListener("keydown", function (ev) {
+    var focused = document.activeElement || {};
+    var typing = /^(INPUT|TEXTAREA|SELECT)$/.test(focused.tagName || "");
+
+    if (!pad.open) {
+      if (ev.key === "s" && !typing && els.overlay.hidden && !ev.metaKey && !ev.ctrlKey) {
+        ev.preventDefault();
+        openSketch(null);
+      }
+      return;
+    }
+    if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); padSend(); return; }
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "z") { ev.preventDefault(); padUndo(); return; }
+    if (ev.key === "Escape") { ev.preventDefault(); closeSketch(); return; }
+    if (typing || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    var shortcut = { p: "pen", a: "arrow", r: "rect", l: "line", e: "erase" }[ev.key.toLowerCase()];
+    if (shortcut) { ev.preventDefault(); padSetTool(shortcut); }
   });
 
   // ---------------------------------------------------------------- stream
@@ -970,6 +1401,10 @@
       els.root.textContent = data.root;
       els.emptyRoot.textContent = data.root;
       if (data.now) skew = Date.now() / 1000 - data.now;
+      sketchEnabled = !!data.sketch;
+      inboxName = data.inbox || inboxName;
+      els.sketchOpen.hidden = !sketchEnabled;
+      els.sketchOpen.title = "sketch something for the agent (s) → " + inboxName + "/";
       apply(data.artifacts, data.rolls);
       connect();
     })

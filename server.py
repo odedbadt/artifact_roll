@@ -7,12 +7,17 @@ builder, ...); an id is one running instance of it.  Each <type>/<id> pair is a
 "roll" of its own, so two architects working at once never mix.  Below that,
 each file (or each sub-directory holding an index.html) is an artifact.
 
+The channel runs both ways: the browser can POST a canvas sketch to
+/api/sketch, which lands as a PNG in a roll of its own for an agent to read.
+
 Stdlib only.  Run:  python3 server.py --root ./artifacts --port 8787
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import mimetypes
 import os
@@ -30,6 +35,14 @@ WEB_DIR = os.path.join(HERE, "web")
 
 IGNORED_NAMES = {"__pycache__", "node_modules", ".git", ".DS_Store", "Thumbs.db"}
 INDEX_NAMES = ("index.html", "index.htm")
+
+# The inbox is a roll like any other, so it has to be <type>/<instance> deep --
+# a single directory under the root is not scanned at all.  You are the agent
+# here; "me" is the instance you keep writing to.
+DEFAULT_INBOX = "sketches/me"
+MAX_SKETCH_BYTES = 16 * 1024 * 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 KIND_BY_EXT = {
     ".svg": "svg",
@@ -359,6 +372,94 @@ class Scanner(threading.Thread):
 
 
 # --------------------------------------------------------------------------
+# sketch inbox -- the browser -> agent direction
+# --------------------------------------------------------------------------
+
+
+def valid_inbox(inbox: str) -> bool:
+    """An inbox must name a roll: exactly <type>/<instance>, both plain names."""
+    parts = inbox.split("/")
+    return len(parts) == 2 and all(SAFE_NAME_RE.match(p) for p in parts)
+
+
+def slugify(text: str, limit: int = 48) -> str:
+    """Squeeze a free-text note into a filename-safe fragment."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    if len(slug) > limit:
+        slug = slug[:limit].rsplit("-", 1)[0] or slug[:limit]
+    return slug.strip("-")
+
+
+def decode_png(payload: str) -> bytes:
+    """Decode a data: URL (or bare base64) into PNG bytes, or raise ValueError."""
+    if not isinstance(payload, str) or not payload:
+        raise ValueError("missing png")
+    if payload.startswith("data:"):
+        head, _, payload = payload.partition(",")
+        if not payload or "base64" not in head:
+            raise ValueError("expected a base64 data: URL")
+        if not head.startswith("data:image/png"):
+            raise ValueError("expected image/png")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"bad base64: {exc}") from None
+    if not raw.startswith(PNG_MAGIC):
+        raise ValueError("not a PNG")
+    return raw
+
+
+def unique_path(directory: str, stem: str, ext: str) -> tuple[str, str]:
+    """Return (full, name) for the first free `stem[-n]ext` in directory."""
+    for attempt in range(1, 100):
+        name = stem + ("" if attempt == 1 else f"-{attempt}") + ext
+        full = os.path.join(directory, name)
+        if not os.path.exists(full):
+            return full, name
+    raise OSError("could not find a free filename")
+
+
+def write_sketch(root: str, inbox: str, png: bytes, note: str, target: str) -> dict:
+    """Drop a sketch (and, if there is a note, a sidecar .md) into the inbox roll."""
+    directory = os.path.join(root, *inbox.split("/"))
+    os.makedirs(directory, exist_ok=True)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    slug = slugify(note)
+    stem = f"{stamp}-{slug}" if slug else stamp
+
+    img_full, img_name = unique_path(directory, stem, ".png")
+    stem = img_name[: -len(".png")]          # keep the sidecar's stem in step
+
+    written = []
+    if note or target:
+        # Sorted by (mtime, path) downstream, and ".note.md" < ".png", so the
+        # note lands just above its sketch in the roll.
+        note_full = os.path.join(directory, stem + ".note.md")
+        # Names the sketch rather than embedding it: the image gets its own card
+        # directly below, and two copies of the same picture is noise.
+        trail = f"sketch [`{img_name}`]({img_name})"
+        if target:
+            trail += f" · annotating `{target}`"
+        lines = [note.strip() or "_(no note)_", "", trail]
+        with open(note_full, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        written.append(rel_posix(os.path.join(inbox, stem + ".note.md")))
+
+    with open(img_full, "wb") as fh:
+        fh.write(png)
+    written.append(rel_posix(os.path.join(inbox, img_name)))
+
+    return {
+        "ok": True,
+        "path": rel_posix(os.path.join(inbox, img_name)),
+        "abs": img_full,
+        "bytes": len(png),
+        "written": written,
+    }
+
+
+# --------------------------------------------------------------------------
 # http
 # --------------------------------------------------------------------------
 
@@ -397,6 +498,7 @@ class Handler(BaseHTTPRequestHandler):
     root: str
     token: str | None
     verbose: bool
+    inbox: str | None          # None when sketching is disabled
 
     def log_message(self, fmt: str, *args) -> None:
         if self.verbose:
@@ -457,6 +559,8 @@ class Handler(BaseHTTPRequestHandler):
                 "root": self.root,
                 "liveWindow": self.scanner.live_window,
                 "now": time.time(),
+                "sketch": bool(self.inbox),
+                "inbox": self.inbox,
                 "rolls": rolls,
                 "artifacts": items,
             })
@@ -466,6 +570,73 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_raw(path[len("/raw/"):], query)
         else:
             self._text(HTTPStatus.NOT_FOUND, "not found\n")
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+
+        def refuse(code: int, message: str) -> None:
+            # The request body goes unread on every path below, so the socket
+            # cannot be reused -- the leftover bytes would be parsed as the next
+            # request.  Answer, then hang up.
+            self.close_connection = True
+            self._text(code, message)
+
+        if not self._authorized(query):
+            refuse(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+            return
+        if parsed.path != "/api/sketch":
+            refuse(HTTPStatus.NOT_FOUND, "not found\n")
+            return
+        if not self.inbox:
+            refuse(HTTPStatus.FORBIDDEN, "sketching is disabled (--no-sketch)\n")
+            return
+        # Only our own page may write.  A custom header cannot be set on a
+        # cross-origin request without a preflight, and we answer no preflight;
+        # Sec-Fetch-Site closes the form-submission loophole in modern browsers.
+        if self.headers.get("X-Artifact-Roll") != "sketch":
+            refuse(HTTPStatus.FORBIDDEN, "missing X-Artifact-Roll header\n")
+            return
+        site = self.headers.get("Sec-Fetch-Site")
+        if site is not None and site not in ("same-origin", "none"):
+            refuse(HTTPStatus.FORBIDDEN, f"cross-site post rejected ({site})\n")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if length <= 0:
+            refuse(HTTPStatus.LENGTH_REQUIRED, "need a Content-Length\n")
+            return
+        if length > MAX_SKETCH_BYTES:
+            refuse(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                   f"sketch too large ({length} > {MAX_SKETCH_BYTES})\n")
+            return
+
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("expected a JSON object")
+            png = decode_png(payload.get("png"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            self._json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+
+        note = str(payload.get("note") or "")[:4000]
+        # `target` is quoted into markdown only -- never used to build a path.
+        target = str(payload.get("target") or "")[:200]
+
+        try:
+            result = write_sketch(self.root, self.inbox, png, note, target)
+        except OSError as exc:
+            self._json({"ok": False, "error": f"write failed: {exc}"},
+                       HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if self.verbose:
+            super().log_message("sketch -> %s (%d bytes)", result["path"], result["bytes"])
+        self._json(result)
 
     def _serve_web(self, name: str, extra: dict) -> None:
         full = os.path.join(WEB_DIR, name)
@@ -545,7 +716,7 @@ def local_ip() -> str:
 
 
 def serve(root: str, host: str, port: int, interval: float, live_window: float,
-          token: str | None, verbose: bool) -> None:
+          token: str | None, verbose: bool, inbox: str | None) -> None:
     os.makedirs(root, exist_ok=True)
     root = os.path.realpath(root)
 
@@ -557,6 +728,7 @@ def serve(root: str, host: str, port: int, interval: float, live_window: float,
         "root": root,
         "token": token,
         "verbose": verbose,
+        "inbox": inbox,
     })
 
     httpd = ThreadingHTTPServer((host, port), handler)
@@ -570,6 +742,10 @@ def serve(root: str, host: str, port: int, interval: float, live_window: float,
     print(f"               http://{shown}:{port}/{suffix}", flush=True)
     if host in ("0.0.0.0", "::"):
         print(f"               http://127.0.0.1:{port}/{suffix}  (local)", flush=True)
+    if inbox:
+        print(f"               sketches -> {os.path.join(root, inbox)}", flush=True)
+    else:
+        print("               sketching disabled", flush=True)
     window = f"{live_window:g}s" if live_window > 0 else "never (always live)"
     print(f"               polling every {interval:g}s, rolls go quiet after {window}", flush=True)
     print("               ctrl-c to stop", flush=True)
@@ -618,9 +794,19 @@ def main() -> None:
     ap.add_argument("--live-window", type=float, default=120.0, metavar="SECS",
                     help="how long after its last write a roll keeps its tab (0 = forever)")
     ap.add_argument("--token", default=None, help="require ?t=TOKEN before serving anything")
+    ap.add_argument("--inbox", default=DEFAULT_INBOX, metavar="TYPE/ID",
+                    help=f"roll that browser sketches are written to (default: {DEFAULT_INBOX})")
+    ap.add_argument("--no-sketch", dest="sketch", action="store_false",
+                    help="refuse sketch uploads; serve read-only")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every request")
     args = ap.parse_args()
-    serve(args.root, args.host, args.port, args.poll, args.live_window, args.token, args.verbose)
+
+    inbox = args.inbox if args.sketch else None
+    if inbox is not None and not valid_inbox(inbox):
+        ap.error("--inbox must be <type>/<instance> (letters, digits, . _ -)")
+
+    serve(args.root, args.host, args.port, args.poll, args.live_window,
+          args.token, args.verbose, inbox)
 
 
 if __name__ == "__main__":

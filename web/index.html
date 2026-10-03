@@ -28,6 +28,7 @@
     <span id="counts" class="counts"></span>
   </div>
   <div class="controls">
+    <button id="sketch-open" class="btn sketch-btn" hidden title="sketch something for the agent (s)">✎ sketch</button>
     <label class="toggle"><input type="checkbox" id="follow" checked> follow</label>
     <span id="status" class="status connecting"><i></i><span>connecting</span></span>
   </div>
@@ -75,6 +76,43 @@
     </div>
   </div>
   <div id="overlay-body" class="overlay-body"></div>
+</div>
+
+<div id="sketchpad" class="overlay pad" hidden>
+  <div class="overlay-bar">
+    <span class="overlay-title">sketch <span id="pad-target" class="pad-target"></span></span>
+    <div class="pad-tools">
+      <div class="tool-group" id="pad-tool">
+        <button class="tool on" data-tool="pen"    title="pen (p)">✏︎</button>
+        <button class="tool"    data-tool="arrow" title="arrow (a)">↗</button>
+        <button class="tool"    data-tool="rect"  title="box (r)">▭</button>
+        <button class="tool"    data-tool="line"  title="line (l)">╱</button>
+        <button class="tool"    data-tool="erase" title="eraser (e)">⌫</button>
+      </div>
+      <div class="tool-group" id="pad-color"></div>
+      <input id="pad-size" class="pad-size" type="range" min="1" max="28" value="5" title="stroke width">
+      <div class="tool-group">
+        <button id="pad-undo"  class="tool" title="undo (⌘Z)">↶</button>
+        <button id="pad-clear" class="tool" title="clear the ink">clear</button>
+        <button id="pad-blank" class="tool" title="blank sheet — drop the background">sheet</button>
+      </div>
+      <button id="pad-close" class="btn" title="close (esc)">close ✕</button>
+    </div>
+  </div>
+
+  <div id="pad-stage" class="pad-stage">
+    <div id="pad-canvases" class="pad-canvases">
+      <canvas id="pad-bg"></canvas>
+      <canvas id="pad-ink"></canvas>
+    </div>
+  </div>
+
+  <div class="pad-foot">
+    <input id="pad-note" class="pad-note" type="text" autocomplete="off"
+           placeholder="what should the agent do with this? (optional — becomes the filename and a note card)">
+    <span id="pad-status" class="pad-status"></span>
+    <button id="pad-send" class="btn primary" title="send (⌘↵)">send to agent ↑</button>
+  </div>
 </div>
 
 <script src="/app.js"></script>

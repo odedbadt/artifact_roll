@@ -4,8 +4,8 @@ A thin server that turns a directory into a live, scrolling roll of artifacts.
 
 Agents (Claude CLI or anything else) drop files into a directory. Open the page
 once and leave it — a tab appears for each agent that is writing, and every new
-file slides in at the bottom of that agent's roll. No build step, no
-dependencies, stdlib Python only.
+file slides in at the bottom of that agent's roll. Sketch something back at them
+from the same page. No build step, no dependencies, stdlib Python only.
 
 ```
 python3 server.py
@@ -79,6 +79,49 @@ one file per artifact. Use .md, .svg, .html, .csv, or .json.
 | anything else | name, size, and a download link |
 
 Every card has **⛶ expand** (full-screen), **↗ open raw**, and **▾ collapse**.
+Images and SVGs also get **✎ sketch**, which opens them in the pad below.
+
+## Sketching back
+
+The roll runs both ways. Hit **✎ sketch** (or press `s`) and you get a canvas; what
+you draw lands in the roll as a PNG the agent can read:
+
+```
+artifacts/
+  sketches/                                   ← you are an agent type too
+    me/                                       ← and this is your roll
+      20261003-143022-fix-the-header.note.md  ← your note, if you wrote one
+      20261003-143022-fix-the-header.png      ← the drawing
+```
+
+It obeys the same two-level contract as everything else — it has to, or the
+scanner would not see it. Sending always marks the roll as freshly written, so
+it takes a tab and the page jumps to it; your sketch is on screen, not behind a
+badge.
+
+Then just say it:
+
+> look at the newest sketch in `artifacts/sketches/me/` and fix what I circled
+
+The note you type becomes the filename slug *and* a small markdown card above the
+sketch, so the intent survives into the roll rather than living only in chat.
+
+**Annotating something the agent made.** Image and SVG cards carry their own ✎ —
+it opens the pad with that artifact as the background, and the note records what
+you were drawing on (`annotating researcher/r-02/chart.svg`). You can also paste
+(`⌘V`) or drag an image in to mark up a screenshot.
+
+| | |
+|---|---|
+| tools | pen `p`, arrow `a`, box `r`, line `l`, eraser `e` |
+| | the eraser lifts only your ink — the background underneath survives |
+| colors | six swatches; stroke width on the slider |
+| undo | `⌘Z`, one stroke at a time |
+| send | `⌘↵` or **send to agent ↑** |
+| close | `esc` |
+
+Sketching is on by default. `--no-sketch` turns the endpoint off and hides the
+button; `--inbox TYPE/ID` moves the roll it writes to.
 
 ## Tabs, and the archive
 
@@ -135,6 +178,8 @@ ever ran in it.
 --live-window S how long after its last write a roll keeps its tab
                                             (default: 120; 0 = never expires)
 --token STR     require ?t=STR on first load, then cookie-based
+--inbox TYPE/ID roll that sketches are written to  (default: sketches/me)
+--no-sketch     refuse sketch uploads; serve read-only
 -v              log every request
 ```
 
@@ -183,6 +228,15 @@ Then browse `http://127.0.0.1:8787/` locally.
   its cookies, or its storage.
 - The height-reporting probe script is injected into the *response* only when
   the roll requests `?probe=1`. Files on disk are never modified.
+- `/api/sketch` is the only route that writes. It writes nothing but a PNG (magic
+  bytes checked) and its note, into `<root>/<inbox>/` (a validated `type/id`
+  pair, never anything deeper) under a server-generated
+  name — no part of the request reaches a path. It requires an `X-Artifact-Roll`
+  header, which a cross-origin page cannot set without a preflight the server
+  does not answer, and rejects a non-same-origin `Sec-Fetch-Site`. `--token`
+  guards it like everything else. Still: this turns an unauthenticated listener
+  into one that writes files, so `--host 0.0.0.0` without a token is worse than
+  it was — tunnel, or pass `--no-sketch`.
 
 ## Try it
 
@@ -195,6 +249,11 @@ researchers and one reviewer — worth of markdown, SVG, CSV, JSON, and an HTML
 bundle. They are checked-in files, so they start in the archive with an empty
 tab strip; `touch examples/reviewer/v-01/notes.md` gives that roll a tab for two
 minutes, and `--live-window 0` keeps every roll permanently tabbed.
+
+Press `s` and scribble: your sketch lands in a roll of its own, which *is*
+live, so it takes a tab and the page jumps to it. Note that this writes into
+`examples/` — a tracked directory — so clean up `examples/sketches/` after, or
+point `--root` somewhere outside the repo.
 
 ## Offline behavior
 
