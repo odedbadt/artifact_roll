@@ -23,7 +23,6 @@ import mimetypes
 import os
 import re
 import socket
-import sys
 import threading
 import time
 from http import HTTPStatus
@@ -758,36 +757,10 @@ def serve(root: str, host: str, port: int, interval: float, live_window: float,
         httpd.server_close()
 
 
-def default_root() -> str:
-    """Where artifacts live when --root is not given.
-
-    A directory agents write into is data, not source, so it does not belong
-    inside the checkout.  The per-user web root is the conventional spot for
-    "files a local server hands out" -- ~/Sites on macOS, ~/public_html
-    everywhere else (Apache mod_userdir) -- and unlike /var/www it is writable
-    without sudo, which matters because serve() creates the root and agents
-    write into it.  Whichever already exists wins; otherwise the platform's
-    preferred one is created.
-
-    $ARTIFACT_ROLL_ROOT overrides all of it, so an agent and the server can
-    agree on a root without passing --root around.
-    """
-    env = os.environ.get("ARTIFACT_ROLL_ROOT")
-    if env:
-        return os.path.expanduser(env)
-    home = os.path.expanduser("~")
-    names = ["Sites", "public_html"] if sys.platform == "darwin" else ["public_html", "Sites"]
-    for name in names:
-        if os.path.isdir(os.path.join(home, name)):
-            return os.path.join(home, name, "artifacts")
-    return os.path.join(home, names[0], "artifacts")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="Live-roll a directory of agent artifacts in the browser.")
-    ap.add_argument("--root", default=default_root(),
-                    help="directory agents dump artifacts into "
-                         f"(default: {default_root()}, created if missing)")
+    ap.add_argument("--root", required=True, metavar="PATH",
+                    help="directory agents dump artifacts into (required, created if missing)")
     ap.add_argument("--host", default="127.0.0.1", help="bind address (use 0.0.0.0 to expose remotely)")
     ap.add_argument("--port", type=int, default=8787, help="port (default: 8787)")
     ap.add_argument("--poll", type=float, default=0.5, help="filesystem poll interval in seconds")

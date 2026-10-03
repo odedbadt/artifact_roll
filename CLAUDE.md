@@ -25,14 +25,14 @@ testing: a launch agent (`com.odedbadt.artifact-roll`, plist in
 `~/Library/LaunchAgents`, log in `~/Library/Logs/artifact-roll.log`) already
 holds 8787 against the real root from login onwards.
 
-**The artifact root is not in the repo.** `default_root()` honours
-`$ARTIFACT_ROLL_ROOT`, else resolves the per-user web root (`~/Sites/artifacts`
-on macOS, `~/public_html/artifacts` elsewhere — Apache `mod_userdir`), created
-on first run. The `~/.claude/skills/artifact-roll` skill teaches agents the same
-resolution order; change one and change the other. A directory agents write into is
-data, not source. Don't reintroduce a repo-relative default; `/var/www` and
-friends were rejected because `serve()` mkdirs the root and agents must be able
-to write there without sudo.
+**The artifact root is not in the repo, and has no default.** `--root` is
+required: it has to match what agents were told to write to, and a wrong guess
+sends a whole run into a directory nobody is watching. The real root is written
+down in two places that must agree — the launchd plist
+(`~/Library/LaunchAgents/com.odedbadt.artifact-roll.plist`) and the
+`~/.claude/skills/artifact-roll` skill. Change one, change the other. A
+directory agents write into is data, not source; don't reintroduce a
+repo-relative default.
 
 ## Server (`server.py`)
 
