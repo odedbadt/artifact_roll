@@ -426,7 +426,62 @@
     host.replaceChildren(box);
   }
 
+  // A thread is one shared canvas drawn on turn by turn.  Layers are
+  // transparent and stack in order; the scrubber walks back through the
+  // conversation rather than showing it as a pile of separate pictures.
+  function renderThread(art, host, full) {
+    var layers = art.layers || [];
+    var canvas = art.canvas || { w: 1600, h: 1000 };
+
+    if (!layers.length) {
+      host.replaceChildren(el("div", "placeholder", "empty thread — no turns yet"));
+      return;
+    }
+
+    var stack = el("div", "thread-stack");
+    stack.style.aspectRatio = canvas.w + " / " + canvas.h;
+
+    var imgs = layers.map(function (layer) {
+      var img = el("img", "thread-layer");
+      img.src = rawUrl(layer.path, "v=" + Math.round(layer.mtime * 1000));
+      img.alt = "turn " + layer.turn + " by " + layer.author;
+      img.loading = "lazy";
+      stack.appendChild(img);
+      return img;
+    });
+
+    var caption = el("div", "thread-caption");
+    var scrub = el("input", "thread-scrub");
+    scrub.type = "range";
+    scrub.min = "1";
+    scrub.max = String(layers.length);
+    scrub.value = String(layers.length);
+    scrub.title = "step back through the turns";
+
+    function show(upto) {
+      imgs.forEach(function (img, i) { img.hidden = i >= upto; });
+      var layer = layers[upto - 1];
+      caption.replaceChildren();
+      var who = el("span", "thread-who", layer.author);
+      who.classList.toggle("mine", layer.author === "me");
+      caption.append(
+        el("span", "thread-turn", "turn " + upto + "/" + layers.length),
+        who
+      );
+      if (layer.note) caption.appendChild(el("span", "thread-note", layer.note));
+    }
+
+    scrub.addEventListener("input", function () { show(Number(scrub.value)); });
+
+    var bar = el("div", "thread-bar");
+    bar.append(scrub, caption);
+    host.replaceChildren(stack, bar);
+    show(layers.length);
+    void full;
+  }
+
   var RENDERERS = {
+    thread: renderThread,
     md: renderMd,
     html: renderHtml,
     svg: renderSvg,
@@ -459,7 +514,8 @@
     card.dataset.id = art.id;
 
     var head = el("header", "card-head");
-    head.appendChild(el("span", "kind", art.bundle ? "site" : art.kind));
+    head.appendChild(el("span", "kind",
+      art.kind === "thread" ? "thread" : art.bundle ? "site" : art.kind));
 
     var title = el("span", "card-title", art.name);
     title.title = art.path;
@@ -492,9 +548,9 @@
 
     // A sketch on top of what the agent drew closes the loop: raster artifacts
     // can be pulled straight into the pad as a background.
-    if (sketchEnabled && (art.kind === "image" || art.kind === "svg")) {
+    if (sketchEnabled && (art.kind === "image" || art.kind === "svg" || art.kind === "thread")) {
       var scribble = el("button", "icon-btn", "✎");
-      scribble.title = "sketch on top of this";
+      scribble.title = art.kind === "thread" ? "take the next turn" : "sketch on top of this";
       scribble.addEventListener("click", function () { openSketch(art); });
       actions.insertBefore(scribble, expand);
     }
@@ -749,7 +805,8 @@
         var item = el("button", "side-art");
         item.type = "button";
         item.title = art.path;
-        item.appendChild(el("span", "side-art-kind", art.bundle ? "site" : art.kind));
+        item.appendChild(el("span", "side-art-kind",
+          art.kind === "thread" ? "thread" : art.bundle ? "site" : art.kind));
         item.appendChild(el("span", "side-art-name", art.name));
         item.addEventListener("click", function () { reveal(art); });
         box.appendChild(item);
@@ -1052,6 +1109,7 @@
     h: SHEET.h,
     bgImage: null,       // HTMLImageElement, or null for a blank sheet
     target: "",          // artifact path being annotated, for the note
+    thread: "",          // thread path when taking a turn, "" for a loose sketch
     strokes: [],
     drawing: null,
     sending: false
@@ -1277,6 +1335,46 @@
     img.src = src;
   }
 
+  // A thread's turns are transparent layers; paint them in order so you draw on
+  // the conversation as it currently stands.
+  function padLoadThread(art) {
+    var layers = (art.layers || []).slice();
+    var canvas = art.canvas || { w: 1600, h: 1000 };
+    padStatus("loading thread…");
+
+    Promise.all(layers.map(function (layer) {
+      return new Promise(function (resolve) {
+        var img = new Image();
+        img.onload = function () { resolve(img); };
+        img.onerror = function () { resolve(null); };     // a bad turn is skipped, not fatal
+        img.src = rawUrl(layer.path, "v=" + Math.round(layer.mtime * 1000));
+      });
+    })).then(function (images) {
+      pad.target = art.path;
+      pad.thread = art.path;
+      els.padTarget.textContent = art.path + " · turn " + (layers.length + 1);
+
+      pad.bgImage = null;
+      pad.w = canvas.w;
+      pad.h = canvas.h;
+      pad.strokes = [];
+      pad.drawing = null;
+      [els.padBg, els.padInk, committed].forEach(function (c) {
+        c.width = pad.w; c.height = pad.h;
+      });
+      bgCtx.fillStyle = "#ffffff";
+      bgCtx.fillRect(0, 0, pad.w, pad.h);
+      images.forEach(function (img) {
+        if (img) bgCtx.drawImage(img, 0, 0, pad.w, pad.h);
+      });
+      padRefreshInk();
+      padFit();
+      padStatus(layers.length
+        ? layers.length + (layers.length === 1 ? " turn so far" : " turns so far")
+        : "first turn");
+    });
+  }
+
   function padLoadFile(file) {
     if (!file || !/^image\//.test(file.type)) return false;
     var reader = new FileReader();
@@ -1319,7 +1417,10 @@
     padSetTool(pad.tool);
     padStatus("");
     els.padSend.disabled = false;
-    if (art) {
+    pad.thread = "";
+    if (art && art.kind === "thread") {
+      padLoadThread(art);
+    } else if (art) {
       padLoadBackground(artUrl(art), art.path);
     } else {
       pad.target = "";
@@ -1336,6 +1437,9 @@
   }
 
   function padCompose() {
+    // In a thread the layer must stay transparent so earlier turns show
+    // through; a standalone sketch is flattened onto its sheet.
+    if (pad.thread) return committed;
     var out = document.createElement("canvas");
     out.width = pad.w;
     out.height = pad.h;
@@ -1348,6 +1452,10 @@
   function padSend() {
     if (pad.sending) return;
     var note = els.padNote.value.trim();
+    if (!pad.strokes.length && pad.thread) {
+      padStatus("draw something to take a turn", "bad");
+      return;
+    }
     if (!pad.strokes.length && !pad.bgImage && !note) {
       padStatus("nothing to send", "bad");
       return;
@@ -1367,13 +1475,15 @@
       body: JSON.stringify({
         png: padCompose().toDataURL("image/png"),
         note: note,
-        target: pad.target
+        target: pad.thread ? "" : pad.target,
+        thread: pad.thread
       })
     }).then(function (r) {
       return r.json().catch(function () { throw new Error("HTTP " + r.status); });
     }).then(function (data) {
       if (!data.ok) throw new Error(data.error || "rejected");
-      padStatus("wrote " + data.path, "ok");
+      padStatus(data.thread ? "turn " + data.turn + " → " + data.thread
+                            : "wrote " + data.path, "ok");
       pendingSelect = data.roll;
       els.padNote.value = "";
       pad.strokes = [];

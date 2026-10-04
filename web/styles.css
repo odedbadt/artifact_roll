@@ -821,3 +821,51 @@ table.csv tr:nth-child(even) td { background: rgba(127,127,127,.045); }
 .pad-status.bad { color: #e06c75; }
 
 .pad-drop { outline: 2px dashed var(--accent); outline-offset: -8px; }
+
+/* ---------- sketch threads ---------- */
+
+.thread-stack {
+  position: relative;
+  width: 100%;
+  background: #fff;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--line-soft);
+}
+.thread-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%; height: 100%;
+  display: block;
+  object-fit: contain;
+}
+.thread-layer[hidden] { display: none; }
+
+.thread-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding-top: 8px;
+  flex-wrap: wrap;
+}
+.thread-scrub { flex: 1 1 140px; min-width: 110px; accent-color: var(--accent); }
+.thread-caption {
+  display: flex; align-items: baseline; gap: 8px;
+  min-width: 0; flex: 2 1 200px;
+  font: 11.5px var(--mono);
+  color: var(--text-faint);
+}
+.thread-turn { flex: 0 0 auto; }
+.thread-who {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--line-soft);
+  color: var(--text-dim);
+}
+.thread-who.mine { background: var(--accent-soft); color: var(--accent); }
+.thread-note {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.overlay-body > .thread-stack { max-height: 78vh; }

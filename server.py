@@ -40,6 +40,14 @@ WEB_DIR = os.path.join(HERE, "web")
 IGNORED_NAMES = {"__pycache__", "node_modules", ".git", ".DS_Store", "Thumbs.db"}
 INDEX_NAMES = ("index.html", "index.htm")
 
+# A directory carrying this is a sketch thread: one shared canvas that both a
+# person and an agent draw on, turn by turn.  Same rule as index.html -- the
+# directory is one artifact, not a bin of them.
+CANVAS_NAME = "canvas.json"
+LAYER_EXTS = (".png", ".svg")
+LAYER_RE = re.compile(r"^(\d{3})-([A-Za-z0-9][A-Za-z0-9._-]*)\.(png|svg)$")
+DEFAULT_CANVAS = {"w": 1600, "h": 1000}
+
 # The inbox is a roll like any other: <type>/<instance>.  --inbox names the type;
 # the instance is the date, so a day's sketching is one roll -- live while you
 # are drawing, a dated entry in the archive afterwards.  That is the same thing
@@ -215,6 +223,84 @@ def bundle_artifact(root: str, reldir: str, roll: dict, index_name: str) -> dict
     }
 
 
+def read_canvas(full_dir: str) -> dict:
+    """The thread's shared coordinate space.  A broken file falls back rather
+    than dropping the thread off the page mid-write."""
+    try:
+        with open(os.path.join(full_dir, CANVAS_NAME), encoding="utf-8") as fh:
+            data = json.load(fh)
+        w, h = int(data.get("w") or 0), int(data.get("h") or 0)
+        if w <= 0 or h <= 0:
+            raise ValueError("canvas needs positive w and h")
+        return {"w": w, "h": h, "title": str(data.get("title") or "")}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return dict(DEFAULT_CANVAS, title="")
+
+
+def read_layers(root: str, reldir: str) -> list[dict]:
+    """Turns, in order.  `NNN-author.png|svg`; anything else is ignored."""
+    full_dir = os.path.join(root, reldir)
+    layers = []
+    try:
+        names = sorted(os.listdir(full_dir))
+    except OSError:
+        return layers
+    for name in names:
+        m = LAYER_RE.match(name)
+        if not m:
+            continue
+        turn, author, ext = m.group(1), m.group(2), m.group(3)
+        try:
+            st = os.stat(os.path.join(full_dir, name))
+        except OSError:
+            continue
+        note = ""
+        note_path = os.path.join(full_dir, f"{turn}-{author}.txt")
+        if os.path.isfile(note_path):
+            try:
+                with open(note_path, encoding="utf-8") as fh:
+                    note = fh.read(2000).strip()
+            except OSError:
+                pass
+        layers.append({
+            "turn": int(turn),
+            "author": author,
+            "kind": ext,
+            "path": rel_posix(os.path.join(reldir, name)),
+            "note": note,
+            "mtime": st.st_mtime,
+            "size": st.st_size,
+        })
+    return layers
+
+
+def thread_artifact(root: str, reldir: str, roll: dict) -> dict:
+    canvas = read_canvas(os.path.join(root, reldir))
+    layers = read_layers(root, reldir)
+    newest = max([l["mtime"] for l in layers], default=0.0)
+    try:
+        newest = max(newest, os.stat(os.path.join(root, reldir, CANVAS_NAME)).st_mtime)
+    except OSError:
+        pass
+    return {
+        "id": rel_posix(reldir) + "/",
+        "agent": roll["agent"],
+        "type": roll["type"],
+        "instance": roll["instance"],
+        "path": rel_posix(reldir),
+        "entry": rel_posix(reldir),
+        "name": canvas["title"] or os.path.basename(reldir),
+        "kind": "thread",
+        "lang": None,
+        "bundle": True,
+        "canvas": {"w": canvas["w"], "h": canvas["h"]},
+        "layers": layers,
+        "files": len(layers),
+        "size": sum(l["size"] for l in layers),
+        "mtime": newest,
+    }
+
+
 def walk_roll(root: str, reldir: str, roll: dict, out: list) -> None:
     try:
         entries = sorted(os.scandir(os.path.join(root, reldir)), key=lambda e: e.name)
@@ -229,8 +315,12 @@ def walk_roll(root: str, reldir: str, roll: dict, out: list) -> None:
         except OSError:
             continue
         if is_dir:
-            # A directory below the roll level that carries an index.html is a
-            # single HTML artifact, not a container of artifacts.
+            # A directory below the roll level that carries a canvas.json is one
+            # sketch thread; one carrying an index.html is one HTML artifact.
+            # Either way it is a single artifact, not a container of them.
+            if os.path.isfile(os.path.join(root, rel, CANVAS_NAME)):
+                out.append(thread_artifact(root, rel, roll))
+                continue
             index_name = next(
                 (n for n in INDEX_NAMES if os.path.isfile(os.path.join(root, rel, n))),
                 None,
@@ -426,6 +516,44 @@ def unique_path(directory: str, stem: str, ext: str) -> tuple[str, str]:
         if not os.path.exists(full):
             return full, name
     raise OSError("could not find a free filename")
+
+
+def write_turn(root: str, thread_rel: str, png: bytes, note: str) -> dict:
+    """Add the next turn to an existing thread.
+
+    The layer is stored exactly as sent -- transparent ink only, no background --
+    so turns composite instead of each one burying the last.
+    """
+    directory = safe_join(root, thread_rel)
+    if not directory or not os.path.isfile(os.path.join(directory, CANVAS_NAME)):
+        raise ValueError("no such thread")
+
+    reldir = rel_posix(os.path.relpath(directory, root))
+    layers = read_layers(root, reldir)
+    turn = (max([l["turn"] for l in layers], default=0) + 1) % 1000
+
+    stem = f"{turn:03d}-me"
+    img_name = stem + ".png"
+    with open(os.path.join(directory, img_name), "wb") as fh:
+        fh.write(png)
+    written = [rel_posix(os.path.join(reldir, img_name))]
+
+    if note.strip():
+        note_name = stem + ".txt"
+        with open(os.path.join(directory, note_name), "w", encoding="utf-8") as fh:
+            fh.write(note.strip() + "\n")
+        written.append(rel_posix(os.path.join(reldir, note_name)))
+
+    return {
+        "ok": True,
+        "path": rel_posix(os.path.join(reldir, img_name)),
+        "abs": os.path.join(directory, img_name),
+        "roll": "/".join(reldir.split("/")[:2]),
+        "thread": reldir,
+        "turn": turn,
+        "bytes": len(png),
+        "written": written,
+    }
 
 
 def write_sketch(root: str, inbox: str, png: bytes, note: str, target: str) -> dict:
@@ -639,9 +767,18 @@ class Handler(BaseHTTPRequestHandler):
         note = str(payload.get("note") or "")[:4000]
         # `target` is quoted into markdown only -- never used to build a path.
         target = str(payload.get("target") or "")[:200]
+        # `thread` IS a path, so it goes through safe_join and must already be a
+        # thread; nothing in the request names the file that gets written.
+        thread = str(payload.get("thread") or "")[:400]
 
         try:
-            result = write_sketch(self.root, self.inbox, png, note, target)
+            if thread:
+                result = write_turn(self.root, thread, png, note)
+            else:
+                result = write_sketch(self.root, self.inbox, png, note, target)
+        except ValueError as exc:
+            self._json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         except OSError as exc:
             self._json({"ok": False, "error": f"write failed: {exc}"},
                        HTTPStatus.INTERNAL_SERVER_ERROR)

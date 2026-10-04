@@ -144,6 +144,39 @@ Sketching is on by default. `--no-sketch` turns the endpoint off and hides the
 button; `--inbox TYPE` renames the type it writes under (the date is always
 the instance).
 
+## Sketch threads — drawing back and forth
+
+A sketch is one-way: you draw, an agent reads. A **thread** is a conversation on
+a single shared canvas, and both sides draw on it.
+
+A directory holding a `canvas.json` is one thread artifact — the same rule as a
+directory holding an `index.html` being one site:
+
+```
+<workspace>/architect-01/layout-review/
+  canvas.json              { "w": 1600, "h": 1000, "title": "layout review" }
+  001-architect-01.svg     the agent's proposal
+  001-architect-01.txt     what it said about that turn
+  002-me.png               your correction, drawn on top
+  002-me.txt
+```
+
+`NNN-author.png|svg` is a turn. Layers are **transparent** and composite in
+order, so every turn lands on the same coordinates: you can point. The card
+stacks them and gives you a scrubber to walk back through the conversation;
+**✎** on a thread opens the pad with every turn so far as the background and
+writes your reply as the next layer.
+
+That split plays to each side. You draw freehand and roughly, because you are
+pointing at something. An agent writes SVG with absolute coordinates in a
+canvas whose size it was told, which is the one visual medium it is precise in
+— so its turns come back as clean vector over your scrawl, and you can tell at a
+glance who drew what.
+
+An agent starts a thread by writing `canvas.json` and its first layer. It takes
+a turn by reading the directory, finding the highest `NNN`, and writing
+`NNN+1-<its-id>.svg`. Nothing else to wire up.
+
 ## Tabs, and the archive
 
 One roll is on screen at a time, and **the tab strip holds exactly the rolls an
