@@ -29,8 +29,8 @@ holds 8787 against the real root from login onwards.
 required: it has to match what agents were told to write to, and a wrong guess
 sends a whole run into a directory nobody is watching. The real root is written
 down in two places that must agree — the launchd plist
-(`~/Library/LaunchAgents/com.odedbadt.artifact-roll.plist`) and the
-`~/.claude/skills/artifact-roll` skill. Change one, change the other. A
+(`~/Library/LaunchAgents/com.odedbadt.artifact-roll.plist`) and the skill in
+`skills/artifact-roll/`. Change one, change the other. A
 directory agents write into is data, not source; don't reintroduce a
 repo-relative default.
 
@@ -89,3 +89,20 @@ State that matters, all module-level: `cards`, `rolls`, `order`, `selected`,
   Preserve that style; drive-by rewrites tend to delete the reasoning.
 - User-visible behaviour changes belong in the README too — it is detailed and
   currently accurate.
+
+## The skill lives here
+
+`skills/artifact-roll/SKILL.md` is the agent-facing half of this project: where
+to write, what renders, how to read a sketch back, how to take a turn in a
+thread. It is the file agents actually load:
+`~/.claude/skills/artifact-roll/SKILL.md` is a symlink to this one, so editing
+it here is editing the live skill and `git diff` shows what changed.
+
+Symlink the **file**, not the directory — a scanner walking `~/.claude/skills`
+with `readdir` may skip a directory symlink, while a symlinked file is followed
+by a plain `open()`. And never leave a backup copy inside `~/.claude/skills/`:
+it loads as a second skill with the same description.
+
+Keep it and the README in their lanes. The README is for the person running the
+server; the skill is for an agent writing into it. The one thing both must agree
+on is the root (`~/Sites/artifacts`), which the plist also hard-codes.
